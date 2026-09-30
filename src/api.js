@@ -1,0 +1,187 @@
+/**
+ * Local API — same interface as desktop Canary's HTTP client, served from IndexedDB in the browser.
+ * All errors surface as { ok: false, error: string }
+ * All successes surface as { ok: true, data: ... }
+ */
+import * as store from './backend/store.js'
+import { ontology, searchThemes } from './backend/ontology.js'
+import { runProjectNow, channel } from './backend/collect.js'
+import { sendToSheet } from './backend/sheets.js'
+import { validateToken, collectionSearch, configuredToken, TOKEN_SETTING } from './backend/mediacloud.js'
+import { archiveItem, archiveBatch, openSnapshot, openArchivesFolder } from './backend/archive.js'
+import { getSetting, setSetting, deleteSetting } from './backend/db.js'
+import watchlistPresets from './backend/data/watchlist_presets.json'
+import { configureNlp, nlpStatus } from './backend/nlp.js'
+
+const { HttpError } = store
+export const inExtension = typeof chrome !== 'undefined' && !!chrome.runtime?.id
+
+async function call(fn) {
+  try {
+    return { ok: true, data: (await fn()) ?? null }
+  } catch (error) {
+    return { ok: false, error: `${error.status || 500}: ${error.message || error}` }
+  }
+}
+const orNotFound = (message) => value => { if (value === null || value === false) throw new HttpError(404, message); return value }
+
+async function sendItemToSheet(projectId, itemId) {
+  const project = orNotFound('Project not found')(await store.getProject(projectId) || null)
+  const item = orNotFound('Item not found')(await store.getItem(projectId, itemId))
+  if (!project.sheet_sink) throw new HttpError(400, 'No sheet sink configured for this project')
+  const [ok, error] = await sendToSheet(item, project.sheet_sink)
+  return store.setSheetStatus(projectId, itemId, ok, error)
+}
+
+// In the extension, collection runs in the offscreen document so it continues when this tab closes.
+async function triggerCollect(projectId) {
+  orNotFound('Project not found')(await store.getProject(projectId) || null)
+  const started = inExtension ? await chrome.runtime.sendMessage({ type: 'run-now', projectId }) : await runProjectNow(projectId)
+  if (!started) throw new HttpError(409, 'No enabled collection lane is available to start')
+  return { status: 'triggered', project_id: projectId }
+}
+
+async function changeNlp(operation) {
+  if (!inExtension) return configureNlp(operation)
+  const prepared = await chrome.runtime.sendMessage({ type: 'prepare-nlp' })
+  if (!prepared?.ready) throw new Error(prepared?.error || 'The NLP collector could not start')
+  const response = await chrome.runtime.sendMessage({ target: 'offscreen', type: 'nlp', operation })
+  if (!response || response.error) throw new Error(response?.error || 'The NLP collector did not respond')
+  return response.result
+}
+
+export const api = {
+  // Projects
+  listProjects: () => call(store.listProjects),
+  getProject: (id) => call(async () => orNotFound('Project not found')(await store.getProject(id) || null)),
+  createProject: (data) => call(() => store.createProject(data)),
+  updateProject: (id, data) => call(async () => orNotFound('Project not found')(await store.updateProject(id, data))),
+  deleteProject: (id) => call(async () => { orNotFound('Project not found')(await store.deleteProject(id)) }),
+  getProjectStats: (id) => call(() => store.stats(id)),
+  triggerCollect: (id) => call(() => triggerCollect(id)),
+  listSourcePreferences: (id) => call(async () => ({ preferences: await store.listSourcePreferences(id) })),
+  setSourcePreference: (id, data) => call(() => store.setSourcePreference(id, data.source_domain)),
+  removeSourcePreference: (id, sourceDomain) =>
+    call(async () => { orNotFound('Source preference not found')(await store.removeSourcePreference(id, sourceDomain)) }),
+
+  // Presets
+  getWatchlistPresets: () => call(() => watchlistPresets),
+
+  // Ontology (CAMEO event categories, actor types, GKG themes, countries)
+  getOntology: () => call(() => ontology),
+  searchGkgThemes: (q, limit = 25) => call(() => searchThemes(q, limit)),
+
+  // Items
+  listItems: (projectId, params = {}) => call(() => store.listItems(projectId, params)),
+  saveItem: (projectId, itemId, data) => call(async () => {
+    const before = orNotFound('Item not found')(await store.getItem(projectId, itemId))
+    const saved = await store.saveItem(projectId, itemId, data)
+    // Auto-send only on the first save (inbox → saved), not when tags are edited later.
+    const project = await store.getProject(projectId)
+    if (before.status === 'inbox' && project?.sheet_sink?.auto_send_on_save) return sendItemToSheet(projectId, itemId)
+    return saved
+  }),
+  deleteItem: (projectId, itemId) => call(async () => { orNotFound('Item not found')(await store.deleteItem(projectId, itemId)) }),
+  dismissItem: (projectId, itemId) => call(async () => orNotFound('Item not found')(await store.dismissItem(projectId, itemId))),
+  preferPrimary: (projectId, itemId, data) =>
+    call(async () => { orNotFound('Item is not in this story group')(await store.preferPrimary(projectId, itemId, data)); return { status: 'saved' } }),
+  reviewDuplicate: (projectId, itemId, data) =>
+    call(async () => { orNotFound('Items not found')(await store.reviewDuplicate(projectId, itemId, data)); return { status: 'saved' } }),
+  undismissItem: (projectId, itemId) => call(async () => orNotFound('Item not found')(await store.undismissItem(projectId, itemId))),
+  bulkDismissFiltered: (projectId, params) => call(async () => ({ dismissed: await store.bulkDismiss(projectId, params) })),
+  getGkgCountTypes: (projectId) => call(async () => ({ count_types: await store.gkgCountTypes(projectId) })),
+  sendToSheet: (projectId, itemId) => call(() => sendItemToSheet(projectId, itemId)),
+  retryFailedSheets: (projectId) => call(async () => {
+    const failed = await store.failedSheetItems(projectId)
+    const results = []
+    for (const item of failed) {
+      const updated = await sendItemToSheet(projectId, item.item_id)
+      results.push({ item_id: item.item_id, success: updated.sheet_send_status === 'sent', error: updated.sheet_last_error })
+    }
+    return { retried: results.length, results }
+  }),
+
+  // Archives (MHTML in Downloads/Canary; the cookie choice applies to desktop's isolated browser only)
+  archiveItem: (projectId, itemId) => call(() => archiveItem(projectId, itemId)),
+  archiveBatch: (projectId, itemIds) => call(() => archiveBatch(projectId, itemIds)),
+  openArchiveSnapshot: (projectId, archiveId) => call(() => openSnapshot(projectId, archiveId)),
+
+  // Visualisation
+  getVizData: (projectId, status, params = {}) => call(() => store.vizItems(projectId, {
+    status, since_created_at: params.sinceCreatedAt, limit: params.limit, offset: params.offset })),
+  getAllVizData: async (projectId, status, params = {}) => {
+    const items = []
+    for (let offset = 0; ;) {
+      const result = await api.getVizData(projectId, status, { sinceCreatedAt: params.sinceCreatedAt, limit: 500, offset })
+      if (!result.ok) return result
+      items.push(...result.data.items)
+      params.onProgress?.({ loaded: items.length, total: result.data.total })
+      if (!result.data.items.length || items.length >= result.data.total) return { ok: true, data: { items, total: result.data.total } }
+      offset += result.data.items.length
+    }
+  },
+  saveEmbeddings: (projectId, embeddings) => call(() => store.saveEmbeddings(projectId, embeddings)),
+
+  // Browser helpers
+  openArchivesFolder: () => call(openArchivesFolder),
+  openUrl: (url) => call(() => { window.open(url, '_blank', 'noopener,noreferrer') }),
+
+  // Headline enrichment for GDELT events: fetches each article's <title>, which needs access to all sites.
+  getTitleEnrichment: () => call(async () => !!await getSetting('title_enrichment')),
+  setTitleEnrichment: (enabled) => {
+    // chrome.permissions.request must run before any await, while the click still counts as a user gesture.
+    const granted = enabled && inExtension ? chrome.permissions.request({ origins: ['https://*/*', 'http://*/*'] }) : Promise.resolve(enabled)
+    return call(async () => {
+      const on = enabled && await granted
+      if (enabled && !on) throw new HttpError(403, 'Chrome did not grant access to article pages')
+      await setSetting('title_enrichment', on)
+      if (!on && inExtension) await chrome.permissions.remove({ origins: ['https://*/*', 'http://*/*'] })
+      return on
+    })
+  },
+
+  // Shared browser NLP models; inference stays in the offscreen collector.
+  getNlpStatus: () => call(nlpStatus),
+  installNlpModel: pack => {
+    const permission = inExtension ? chrome.permissions.request({ origins: ['https://huggingface.co/*', 'https://*.hf.co/*'] }) : Promise.resolve(true)
+    return call(async () => {
+      if (!await permission) throw new HttpError(403, 'Chrome did not grant access to the model download host')
+      return changeNlp({ type: 'install', pack })
+    })
+  },
+  removeNlpModel: pack => call(() => changeNlp({ type: 'remove', pack })),
+  setNlpEnabled: (pack, enabled) => call(() => changeNlp({ type: 'enable', pack, enabled })),
+
+  // Media Cloud (application credential + curated collection directory)
+  getMediaCloudStatus: () => call(async () => ({ configured: !!await configuredToken(), source: 'local' })),
+  setMediaCloudToken: (token) => call(async () => {
+    if (!token.trim()) throw new HttpError(400, 'Media Cloud API token is required')
+    try { await validateToken(token.trim()) } catch { throw new HttpError(400, 'Media Cloud rejected this API token') }
+    await setSetting(TOKEN_SETTING, token.trim())
+    return { configured: true }
+  }),
+  clearMediaCloudToken: () => call(async () => { await deleteSetting(TOKEN_SETTING); return { configured: false } }),
+  searchMediaCloudCollections: (q) => call(async () => {
+    const token = await configuredToken()
+    if (!token) throw new HttpError(428, 'Configure a Media Cloud API token first')
+    try { return { collections: await collectionSearch(token, q) } } catch { throw new HttpError(502, 'Media Cloud collection search failed') }
+  }),
+
+  // Logs
+  getLogs: (projectId, limit = 50) => call(() => store.listLogs(projectId, limit)),
+  cancelLog: (projectId, logId) => call(async () => {
+    const cancelled = await store.cancelLog(projectId, logId)
+    channel?.postMessage({ type: 'cancel', logId })
+    if (!cancelled) throw new HttpError(404, 'Log not found or already finished')
+    return { ok: true }
+  }),
+
+  // Backup (this browser's IndexedDB is the only copy of the data)
+  exportBackup: () => call(store.exportBackup),
+  importBackup: (data) => call(() => store.importBackup(data)),
+
+  // Rule presets (global, stored locally)
+  listPresets: () => call(store.listPresets),
+  createPreset: (data) => call(() => store.createPreset(data)),
+  deletePreset: (id) => call(async () => { orNotFound('Preset not found')(await store.deletePreset(id)) }),
+}
