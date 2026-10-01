@@ -12,6 +12,9 @@
   import { api } from '../api.js'
   import MediaCloudConfig from './MediaCloudConfig.svelte'
   import { cloneMediaCloudCollections, mediaCloudCollectionsForRule } from '../lib/mediacloudRules.js'
+  import BlueskyAccount from './BlueskyAccount.svelte'
+  import { xQuery, xSearchUrl, X_LIST } from '../backend/x.js'
+  import { blueskySearches, blueskyLabel, blueskyWebUrl, BLUESKY_LIST } from '../backend/bluesky.js'
 
   export let rule = null
   export let siblingRule = null  // legacy prop retained for compatibility
@@ -24,7 +27,7 @@
 
   // ── Shared state ─────────────────────────────────────────────────────────────
   let ruleName = rule?.bucket_name || ''
-  let activeTab = rule?.lane === 'rss' || rule?.lane === 'mediacloud'
+  let activeTab = ['rss', 'mediacloud', 'x', 'bluesky'].includes(rule?.lane)
     ? rule.lane
     : ((rule?.lane === 'doc' || rule?.lane === 'context') ? 'doc' : 'events')
   let nameError = ''
@@ -55,6 +58,8 @@
   const _docRule    = _bucketRules.find(r => _isGkgLane(r)) || null
   const _rssRule    = _bucketRules.find(r => r.lane === 'rss') || null
   const _mediacloudRule = _bucketRules.find(r => r.lane === 'mediacloud') || null
+  const _xRule = _bucketRules.find(r => r.lane === 'x') || null
+  const _blueskyRule = _bucketRules.find(r => r.lane === 'bluesky') || null
   let mediaCloudDraftCollections = cloneMediaCloudCollections(
     mediaCloudCollectionsForRule(_mediacloudRule, mediaCloudCollections)
   )
@@ -64,7 +69,47 @@
     if (lane === 'doc') return _docRule
     if (lane === 'rss') return _rssRule
     if (lane === 'mediacloud') return _mediacloudRule
+    if (lane === 'x') return _xRule
+    if (lane === 'bluesky') return _blueskyRule
     return null
+  }
+
+  // ── X and Bluesky tab state ──────────────────────────────────────────────────
+  // Both take a search, accounts and a start. datetime-local fields hold local wall time; the rule stores UTC.
+  const SOCIAL_LANES = ['x', 'bluesky']
+  const localInput = iso => { const d = new Date(iso); return new Date(d - d.getTimezoneOffset() * 60_000).toISOString().slice(0, 16) }
+  function socialForm(lane) {
+    const logic = existingRuleForLane(lane)?.logic || {}
+    return { search: logic[`${lane}_query`] || '', accounts: (logic[`${lane}_accounts`] || []).join(', '),
+      savedSince: logic[`${lane}_since`], since: localInput(logic[`${lane}_since`] || Date.now()), error: '' }
+  }
+  let social = { x: socialForm('x'), bluesky: socialForm('bluesky') }
+  // The field drops seconds; keep the saved start unless it was changed, since a new start restarts the rule's backfill.
+  function socialLogic(lane, form = social[lane]) {
+    const since = form.savedSince && form.since === localInput(form.savedSince) ? form.savedSince : form.since ? new Date(form.since).toISOString() : null
+    return { [`${lane}_query`]: form.search.trim(), [`${lane}_accounts`]: form.accounts.split(/[\s,]+/).filter(Boolean), [`${lane}_since`]: since }
+  }
+  // What a rule will search, as typed on the service's own site.
+  function socialSearches(lane, logic) {
+    if (lane === 'bluesky') return blueskySearches(logic).map(search => ({ text: blueskyLabel(search), url: blueskyWebUrl(search) }))
+    const query = xQuery(logic)
+    return query ? [{ text: query, url: xSearchUrl(query).split('#')[0] }] : []
+  }
+  $: socialPreview = SOCIAL_LANES.includes(activeTab) ? socialSearches(activeTab, socialLogic(activeTab, social[activeTab])) : []
+  // What a rule costs each run, with a nudge toward a list when it follows many accounts.
+  function socialCost(lane, logic) {
+    const accounts = logic[`${lane}_accounts`].filter(entry => !(lane === 'x' ? X_LIST : BLUESKY_LIST).test(entry)).length
+    const searches = socialSearches(lane, logic).length
+    if (lane === 'bluesky' && accounts > 3) return `${searches} searches each run, one per account. A list does it in one: add these accounts to a list on bsky.app and paste its link here.`
+    if (lane === 'x' && accounts > 8) return `${accounts} accounts make a long search. Add them to a list on x.com and paste its link here to keep it short.`
+    return `${searches} search${searches === 1 ? '' : 'es'} each run, more while catching up.`
+  }
+  $: socialCostNote = SOCIAL_LANES.includes(activeTab) && socialPreview.length ? socialCost(activeTab, socialLogic(activeTab, social[activeTab])) : ''
+  // A Bluesky list brings every post by its members; Bluesky cannot narrow it by a search.
+  const mixesListAndSearch = logic => !!logic.bluesky_query && (logic.bluesky_accounts || []).some(entry => BLUESKY_LIST.test(entry))
+  function editSocial() {
+    markLane(activeTab)
+    social[activeTab].error = ''
   }
 
   // ── Events tab state ─────────────────────────────────────────────────────────
@@ -895,6 +940,8 @@
         rssSimpleMode = simpleModeFromRule(sourceRule)
         rssStep = 0
       }
+    } else if (SOCIAL_LANES.includes(lane)) {
+      social[lane] = { ...social[lane], search: logic[`${lane}_query`] || '', accounts: (logic[`${lane}_accounts`] || []).join(', ') }
     } else {
       selectedCodes = new Set(logic.event_code_prefix || [])
       requiredActors = [...(logic.required_actor_countries || [])]
@@ -1036,6 +1083,10 @@
 
   function logicForLane(lane) {
     if (lane === 'doc') return buildDocLogic()
+    if (SOCIAL_LANES.includes(lane)) {
+      const logic = socialLogic(lane)
+      return { ...logic, description: `${lane === 'x' ? 'X' : 'Bluesky'}: ${socialSearches(lane, logic).map(search => search.text).join('; ')}` }
+    }
     if (lane === 'rss' || lane === 'mediacloud') {
       return preserveUnknownHeadlineLogic(lane, buildHeadlineLogic(lane))
     }
@@ -1043,7 +1094,7 @@
   }
 
   function lanesToSave() {
-    return ['events', 'doc', 'rss', 'mediacloud'].filter(lane =>
+    return ['events', 'doc', 'rss', 'mediacloud', 'x', 'bluesky'].filter(lane =>
       existingRuleForLane(lane) || touchedLanes.has(lane) || (lane === activeTab && !rule)
     )
   }
@@ -1072,7 +1123,7 @@
     } else if (activeTab === 'doc') {
       // GKG preset: themes, also_countries, persons, organizations, adm1_codes, description
       logic = { ...buildDocLogic(), description: name }
-    } else if (activeTab === 'rss' || activeTab === 'mediacloud') {
+    } else if (activeTab === 'rss' || activeTab === 'mediacloud' || SOCIAL_LANES.includes(activeTab)) {
       logic = { ...logicForLane(activeTab), description: name }
     } else {
       logic = buildEventsLogic()
@@ -1095,6 +1146,7 @@
   function save() {
     nameError = ''
     mediaCloudError = ''
+    social.x.error = social.bluesky.error = ''
     if (!ruleName.trim()) {
       nameError = 'Rule name is required'
       return
@@ -1108,7 +1160,24 @@
       mediaCloudError = 'Choose at least one Media Cloud collection before saving this rule.'
       return
     }
-    onSave(rules.length === 1 ? rules[0] : rules)
+    const saved = rules.length === 1 ? rules[0] : rules
+    const empty = rules.find(savedRule => SOCIAL_LANES.includes(savedRule.lane) && savedRule.enabled !== false && !socialSearches(savedRule.lane, savedRule.logic).length)
+    if (empty) {
+      activeTab = empty.lane
+      social[empty.lane].error = 'Enter a search, at least one account, or both.'
+      return
+    }
+    if (rules.some(savedRule => savedRule.lane === 'bluesky' && savedRule.enabled !== false && mixesListAndSearch(savedRule.logic))) {
+      activeTab = 'bluesky'
+      social.bluesky.error = 'A Bluesky list brings every post by its members and cannot be narrowed by a search. Put the list in a rule of its own.'
+      return
+    }
+    if (!rules.some(savedRule => savedRule.lane === 'x' && savedRule.enabled !== false)) return onSave(saved)
+    // Chrome asks for access to x.com during this click; once granted it answers at once.
+    api.allowX().then(response => {
+      if (response.ok) onSave(saved)
+      else { activeTab = 'x'; social.x.error = response.error }
+    })
   }
 </script>
 
@@ -1151,7 +1220,7 @@
                 on:click={() => applyPreset(preset)}
                 title="Load: {preset.name} ({preset.lane})"
               >
-                {preset.lane === 'events' ? '📊' : preset.lane === 'rss' ? '🛰' : preset.lane === 'mediacloud' ? 'MC' : preset.lane === 'ruleset' ? '📦' : '📰'} {preset.name}
+                {preset.lane === 'events' ? '📊' : preset.lane === 'rss' ? '🛰' : preset.lane === 'mediacloud' ? 'MC' : preset.lane === 'x' ? '𝕏' : preset.lane === 'bluesky' ? '🦋' : preset.lane === 'ruleset' ? '📦' : '📰'} {preset.name}
               </button>
               <button
                 class="preset-chip-del"
@@ -1212,6 +1281,28 @@
         <span class="tab-label">
           Google News RSS
           <span class="tab-sub">Interview wizard for headline-driven RSS searches</span>
+        </span>
+      </button>
+      <button
+        class="qb-tab"
+        class:active={activeTab === 'x'}
+        on:click={() => switchTab('x')}
+      >
+        <span class="tab-icon" aria-hidden="true">𝕏</span>
+        <span class="tab-label">
+          X (Twitter)
+          <span class="tab-sub">Searches and accounts, read with your sign-in</span>
+        </span>
+      </button>
+      <button
+        class="qb-tab"
+        class:active={activeTab === 'bluesky'}
+        on:click={() => switchTab('bluesky')}
+      >
+        <span class="tab-icon" aria-hidden="true">🦋</span>
+        <span class="tab-label">
+          Bluesky
+          <span class="tab-sub">Searches and accounts through Bluesky's API</span>
         </span>
       </button>
     </div>
@@ -1696,6 +1787,77 @@
             </ul>
           </div>
 
+        </div>
+      {:else if SOCIAL_LANES.includes(activeTab)}
+        <div class="x-tab">
+          {#if activeTab === 'x'}
+            <p class="qb-explainer">
+              On each run Canary opens this search on x.com in a background tab of this browser, signed in as you,
+              and collects every post since the last run, about 20 per page load. Sign in to x.com in this Chrome profile first.
+            </p>
+          {:else}
+            <p class="qb-explainer">
+              On each run Canary searches Bluesky through its API and collects every post since the last run, up to 100 per request.
+            </p>
+            <BlueskyAccount />
+          {/if}
+
+          <div class="qb-section">
+            <h3 class="qb-section-title">1. Search <span class="optional">{activeTab === 'x' ? 'X' : 'Bluesky'} search syntax</span></h3>
+            <p class="qb-section-hint">
+              {#if activeTab === 'x'}
+                Words, "exact phrases", OR, -exclusions and operators such as <code>lang:es</code>, <code>min_faves:10</code> or <code>filter:links</code>.
+              {:else}
+                Words, "exact phrases" and operators such as <code>lang:es</code>, <code>domain:apnews.com</code> or <code>#tag</code>.
+              {/if}
+            </p>
+            <input
+              type="text"
+              class="qb-input qb-input--wide"
+              placeholder={activeTab === 'x' ? 'e.g. "border closure" OR deportation lang:es' : 'e.g. "border closure" lang:es'}
+              bind:value={social[activeTab].search}
+              on:input={editSocial}
+            />
+          </div>
+
+          <div class="qb-section">
+            <h3 class="qb-section-title">2. Accounts <span class="optional">optional</span></h3>
+            <p class="qb-section-hint">
+              Handles or list links, separated by commas or spaces. With a search above, only their posts that match it are kept.
+              {#if activeTab === 'x'}
+                A list (<code>x.com/i/lists/…</code>) follows all of its members in one search.
+              {:else}
+                A list (<code>bsky.app/profile/…/lists/…</code>) brings every post by its members in one request, so give it a rule without a search.
+              {/if}
+            </p>
+            <input
+              type="text"
+              class="qb-input qb-input--wide"
+              placeholder={activeTab === 'x' ? 'e.g. @Reuters, @AP' : 'e.g. @reuters.com, @apnews.com'}
+              bind:value={social[activeTab].accounts}
+              on:input={editSocial}
+            />
+          </div>
+
+          <div class="qb-section">
+            <h3 class="qb-section-title">3. Start collecting from</h3>
+            <p class="qb-section-hint">
+              Posts before this moment are skipped. An earlier date backfills with the requests left after new posts, so a long backfill takes several runs.
+            </p>
+            <input type="datetime-local" class="qb-input" bind:value={social[activeTab].since} on:input={editSocial} />
+          </div>
+
+          <div class="qb-section">
+            <h3 class="qb-section-title">4. Preview</h3>
+            {#each socialPreview as search}
+              <code class="rss-query-code">{search.text}</code>
+              <a class="qb-ref-link" href={search.url} target="_blank" rel="noopener noreferrer">Open on {activeTab === 'x' ? 'x.com' : 'bsky.app'}</a>
+            {:else}
+              <p class="qb-section-hint">Enter a search, accounts, or both.</p>
+            {/each}
+            {#if socialCostNote}<p class="qb-section-hint qb-cost">{socialCostNote}</p>{/if}
+            {#if social[activeTab].error}<p class="qb-error" role="alert">{social[activeTab].error}</p>{/if}
+          </div>
         </div>
       {:else}
         <div class="rss-tab">
@@ -2215,7 +2377,8 @@
   /* ── Tabs ──────────────────────────────────────────────────────────────────── */
   .qb-tabs {
     border-bottom: 1px solid var(--border);
-    display: flex;
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
   }
   .qb-tab {
     align-items: center;
@@ -2247,7 +2410,8 @@
     overflow-y: auto;
     padding: 0;
   }
-  .events-tab, .doc-tab, .rss-tab { padding: 1rem 1.25rem 2rem; }
+  .events-tab, .doc-tab, .rss-tab, .x-tab { padding: 1rem 1.25rem 2rem; }
+  .qb-cost { margin-top: 0.6rem; }
 
   /* ── Explainer ─────────────────────────────────────────────────────────────── */
   .qb-explainer {

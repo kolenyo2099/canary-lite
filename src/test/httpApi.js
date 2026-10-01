@@ -158,6 +158,14 @@ export const api = {
   getTitleEnrichment: () => request('GET', '/title-enrichment'),
   setTitleEnrichment: (enabled) => request('PUT', '/title-enrichment', { enabled }),
 
+  // Extension-only X and Bluesky lanes
+  allowX: () => Promise.resolve({ ok: true, data: null }),
+  getSocialBudgets: () => request('GET', '/social-budgets'),
+  setSocialBudget: (lane, per) => request('PUT', `/social-budgets/${lane}`, { per }),
+  getBlueskyStatus: () => request('GET', '/bluesky/account'),
+  setBlueskyAccount: (identifier, password) => request('PUT', '/bluesky/account', { identifier, password }),
+  clearBlueskyAccount: () => request('DELETE', '/bluesky/account'),
+
   // Media Cloud (application credential + curated collection directory)
   getMediaCloudStatus: () => request('GET', '/mediacloud/status'),
   setMediaCloudToken: (token) => request('PUT', '/mediacloud/token', { token }),

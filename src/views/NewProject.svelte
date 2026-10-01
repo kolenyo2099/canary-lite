@@ -24,6 +24,8 @@
   let docEnabled = true
   let rssEnabled = false
   let mediacloudEnabled = false
+  let xEnabled = false
+  let blueskyEnabled = false
   let mediacloudCollections = []
   let legacyMediaCloudCollections = []
   let creating = false
@@ -145,6 +147,8 @@ function doPost(e) {
         recomputeMediaCloudCollections()
         if (incoming.some(r => r.lane === 'rss')) rssEnabled = true
         if (incoming.some(r => r.lane === 'mediacloud')) mediacloudEnabled = true
+        if (incoming.some(r => r.lane === 'x')) xEnabled = true
+        if (incoming.some(r => r.lane === 'bluesky')) blueskyEnabled = true
         notify('success', `Loaded ${incoming.length} rule(s) from file`)
       } catch (_) {
         notify('error', 'Could not parse ruleset file')
@@ -232,6 +236,8 @@ function doPost(e) {
     const editedBucket = editingRuleIdx !== null ? watchlists[editingRuleIdx]?.bucket_name : null
     const rssChanged = savedLaneWasAddedOrChanged(newRules, 'rss', editedBucket)
     const mediaCloudChanged = savedLaneWasAddedOrChanged(newRules, 'mediacloud', editedBucket)
+    const xChanged = savedLaneWasAddedOrChanged(newRules, 'x', editedBucket)
+    const blueskyChanged = savedLaneWasAddedOrChanged(newRules, 'bluesky', editedBucket)
     const savedLanes = new Set(newRules.map(rule => rule.lane))
     watchlists = [
       ...watchlists.filter((rule, idx) => {
@@ -249,6 +255,8 @@ function doPost(e) {
     recomputeMediaCloudCollections()
     if (rssChanged) rssEnabled = true
     if (mediaCloudChanged) mediacloudEnabled = true
+    if (xChanged) xEnabled = true
+    if (blueskyChanged) blueskyEnabled = true
     showQueryBuilder = false
     editingRuleIdx = null
   }
@@ -306,11 +314,15 @@ function doPost(e) {
         doc_interval_minutes: 60,
         rss_interval_minutes: 60,
         mediacloud_interval_minutes: 1440,
+        x_interval_minutes: 60,
+        bluesky_interval_minutes: 60,
         overlap_minutes: 15,
         events_enabled: eventsEnabled,
         doc_enabled: docEnabled,
         rss_enabled: rssEnabled,
         mediacloud_enabled: mediacloudEnabled,
+        x_enabled: xEnabled,
+        bluesky_enabled: blueskyEnabled,
       },
       mediacloud_collections: mediacloudCollections,
     }
@@ -329,7 +341,7 @@ function doPost(e) {
     if (result.ok) {
       projects.update(ps => [result.data, ...ps])
       currentProjectId.set(result.data.project_id)
-      const anyEnabled = eventsEnabled || docEnabled || rssEnabled || mediacloudEnabled
+      const anyEnabled = eventsEnabled || docEnabled || rssEnabled || mediacloudEnabled || xEnabled || blueskyEnabled
       notify('success', `Project "${result.data.name}" created${anyEnabled ? ' – collection started' : ''}`)
       currentView.set('inbox')
       if (anyEnabled) {
@@ -492,6 +504,22 @@ function doPost(e) {
         <input type="checkbox" bind:checked={mediacloudEnabled} />
         <span>
           <strong>Media Cloud</strong> — curated collection searches (once daily)
+        </span>
+      </label>
+    </div>
+    <div class="toggle-row">
+      <label class="toggle-label">
+        <input type="checkbox" bind:checked={xEnabled} />
+        <span>
+          <strong>X (Twitter)</strong> — searches and accounts, read in this browser while you are signed in to x.com (every 60 min)
+        </span>
+      </label>
+    </div>
+    <div class="toggle-row">
+      <label class="toggle-label">
+        <input type="checkbox" bind:checked={blueskyEnabled} />
+        <span>
+          <strong>Bluesky</strong> — searches and accounts through Bluesky's API, with an app password (every 60 min)
         </span>
       </label>
     </div>
@@ -691,6 +719,8 @@ function doPost(e) {
   .lane-badge--doc    { background: #d1fae5; color: #065f46; }
   .lane-badge--rss    { background: var(--accent-soft); color: var(--accent-strong); }
   .lane-badge--mediacloud { background: #ede9fe; color: #5b21b6; }
+  .lane-badge--x { background: #e5e7eb; color: #111827; }
+  .lane-badge--bluesky { background: #dbeafe; color: #1d4ed8; }
   .rule-actions { display: flex; gap: 0.25rem; }
   .btn-rule-edit {
     background: none; border: 1px solid var(--border); border-radius: 3px;

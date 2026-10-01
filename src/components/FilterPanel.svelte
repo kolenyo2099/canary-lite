@@ -176,7 +176,7 @@
   <div class="panel-section">
     <div class="panel-label">Source</div>
     <div class="btn-group">
-      {#each [['', 'All'], ['events', 'Events'], ['gkg', 'GKG'], ['rss', 'RSS'], ['mediacloud', 'Media Cloud']] as [val, label]}
+      {#each [['', 'All'], ['events', 'Events'], ['gkg', 'GKG'], ['rss', 'RSS'], ['mediacloud', 'Media Cloud'], ['x', 'X'], ['bluesky', 'Bluesky']] as [val, label]}
         <button
           class="btn-toggle"
           class:active={$filters.sourceType === val}

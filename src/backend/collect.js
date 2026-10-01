@@ -4,6 +4,8 @@ import { getProject, listProjects, patchProject, itemUpserter, createLog, finish
 import { getSetting, setSetting, get, putMany } from './db.js'
 import { compileQueries, rssWindows, rssUrl, simpleFilterPasses } from './rss.js'
 import { fetchForProject, configuredToken } from './mediacloud.js'
+import { xQuery, xSearchUrl, xItems, xWindowSearch } from './x.js'
+import { BLUESKY_ACCOUNT, blueskySearch, blueskyListFeed, blueskySearches, blueskyItems, blueskyLabel, blueskyRate } from './bluesky.js'
 import { decodeEntities } from './gdelt.js'
 import { enrichItems } from './nlp.js'
 
@@ -221,8 +223,173 @@ export async function collectMediaCloud(project, log, signal) {
   return error
 }
 
+// ── X and Bluesky ───────────────────────────────────────────────────────────
+// Each search keeps a cursor: `high` is how far collection has reached since the rule's start (logic.x_since or
+// logic.bluesky_since), and `holes` are the stretches not collected yet, newest first. Each run opens the stretch since
+// the last one as the newest hole, and every page goes to the newest hole among the project's searches. So new posts
+// never wait behind a backfill, which gets only the pages left over, and busy searches take turns. A hole is filled
+// from its newest end down, as scrolling does, until a page brings nothing new.
+const INDEX_LAG_MS = 5 * 60_000 // the newest minutes wait for the next run, so posts indexed late are not skipped
+
+// A search whose recent holes came back empty is polled less often, up to 4× the lane's interval.
+export function openHole(cursor, nowMs, intervalMs) {
+  const backoff = intervalMs * Math.min(2 ** cursor.quiet, 4)
+  const end = new Date(nowMs - INDEX_LAG_MS).toISOString()
+  if (cursor.polled_at && nowMs - Date.parse(cursor.polled_at) < 0.9 * backoff || cursor.high >= end) return cursor
+  return { ...cursor, polled_at: new Date(nowMs).toISOString(), high: end, holes: [{ from: cursor.high, to: end, first: true }, ...cursor.holes] }
+}
+
+// Fills the newest hole with one page. `fresh` are the page's posts in the hole not seen earlier this run, `next` is a
+// feed's own cursor to the following page, and `done` says the page reached the hole's start. The hole then ends a
+// second after its oldest post so far, so posts sharing that second are not skipped; repeats are dropped as seen.
+export function fillHole(cursor, fresh, { next, done } = {}) {
+  const [hole, ...older] = cursor.holes
+  const quiet = hole.first ? (fresh.length ? 0 : cursor.quiet + 1) : cursor.quiet
+  if (done || !fresh.length) return { ...cursor, quiet, holes: older }
+  const oldest = Math.min(...fresh.map(item => Math.floor(Date.parse(item.datetime_utc) / 1000)))
+  return { ...cursor, quiet, holes: [{ from: hole.from, to: new Date((oldest + 1) * 1000).toISOString(), ...(next && { next }) }, ...older] }
+}
+
+// One budget per service for this browser's account, shared by every project, so more projects or rules make
+// collection slower rather than heavier. It sits well under each service's limit: X's web app allows about 50
+// searches per 15 minutes per account, Bluesky 3000 requests per 5 minutes per IP address. `reserve` holds back what
+// the service itself reports as remaining, for the user's own use. Users can change `per` in Project Settings.
+export const BUDGETS = {
+  x: { per: 20, windowMs: 15 * 60_000, gapMs: 15_000, jitterMs: 10_000, daily: 400, reserve: 10 },
+  bluesky: { per: 300, windowMs: 5 * 60_000, gapMs: 0, jitterMs: 0, daily: 20_000, reserve: 300 },
+}
+const MAX_WAIT_MS = 90_000 // a longer wait ends the run instead; collection continues next run
+
+// A token bucket refilled evenly over the window.
+const tokensAt = (state, budget, nowMs) => Math.min(budget.per, (state.tokens ?? budget.per) + (nowMs - (state.at ?? nowMs)) * budget.per / budget.windowMs)
+export const budgetUsed = (state = {}, budget, nowMs) => Math.round(budget.per - tokensAt(state, budget, nowMs))
+
+// The wait before the next request, and the budget after it: a free token, a gap with jitter after the last request,
+// the daily ceiling, and the reserve of what the service reports as remaining until it resets.
+export function budgetStep(state = {}, budget, nowMs, random = Math.random()) {
+  const day = new Date(nowMs).toDateString()
+  const used = state.day === day ? state.used : 0
+  if (used >= budget.daily) return { wait: Infinity }
+  const tokens = tokensAt(state, budget, nowMs)
+  const { remaining, reset } = state.server || {}
+  const wait = Math.max(0,
+    tokens >= 1 ? 0 : (1 - tokens) * budget.windowMs / budget.per,
+    (state.last ?? 0) + budget.gapMs + random * budget.jitterMs - nowMs,
+    remaining <= budget.reserve && reset > nowMs ? reset - nowMs : 0)
+  return { wait, next: { ...state, day, used: used + 1, tokens: Math.min(budget.per, tokens + wait * budget.per / budget.windowMs) - 1, at: nowMs + wait } }
+}
+
+// Runs one request under its lane's budget, one at a time across every project and app tab, and records the limit
+// the service reported. Returns null instead of waiting long.
+function withBudget(lane, request) {
+  return navigator.locks.request(`canary:budget:${lane}`, async () => {
+    const budget = { ...BUDGETS[lane], per: Number(await getSetting(`${lane}_budget_per`)) || BUDGETS[lane].per }
+    const { wait, next } = budgetStep(await getSetting(`${lane}_budget`), budget, Date.now())
+    if (wait > MAX_WAIT_MS) return null
+    await sleep(wait)
+    const result = await request()
+    await setSetting(`${lane}_budget`, { ...next, last: Date.now(), server: result.rate || next.server })
+    return result
+  })
+}
+
+// X pages load in a background tab of this browser, signed in as the user (see x.js).
+async function xPage(project, rule, { query }, hole) {
+  if (typeof chrome === 'undefined' || !chrome.runtime?.id) return { error: 'X collection needs the Canary Chrome extension', stop: true }
+  const result = await chrome.runtime.sendMessage({ type: 'x-read', url: xSearchUrl(xWindowSearch(query, hole)) }).catch(error => ({ error: error.message }))
+  if (!result?.responses) return { error: result?.error || 'the background collector did not respond', stop: result?.stop }
+  const last = result.responses.at(-1)
+  const rate = last?.remaining ? { remaining: Number(last.remaining), reset: Number(last.reset) * 1000 } : null
+  const failed = result.responses.find(r => r.status !== 200)?.status
+  if (failed === 429) return { limited: rate?.reset || true, rate }
+  return failed ? { error: `X answered HTTP ${failed}`, rate } : { items: xItems(result.responses, project, rule, query), rate }
+}
+
+// Bluesky pages come from its API, signed in with the user's app password (see bluesky.js).
+async function blueskyPage(project, rule, search, hole) {
+  const account = await getSetting(BLUESKY_ACCOUNT)
+  if (!account) return { error: 'connect a Bluesky account in the Bluesky rule editor', stop: true }
+  try {
+    if (search.list) {
+      // A list feed has no date filter: it pages back by its own cursor until a page passes the hole's start.
+      const { feed = [], cursor } = await blueskyListFeed(account, search.list, hole.next)
+      return { items: blueskyItems(feed.filter(entry => !entry.reason).map(entry => entry.post), project, rule, blueskyLabel(search)), next: cursor, done: !cursor, rate: blueskyRate() }
+    }
+    const { posts = [] } = await blueskySearch(account, { q: search.q, ...(search.author && { author: search.author }), sort: 'latest', since: hole.from, until: hole.to, limit: 100 })
+    return { items: blueskyItems(posts, project, rule, blueskyLabel(search)), rate: blueskyRate() }
+  } catch (error) {
+    if (error.status === 429) return { limited: error.reset || true, rate: blueskyRate() }
+    if (error.status === 401) return { error: 'Bluesky rejected the saved account; connect it again in the Bluesky rule editor', stop: true }
+    return { error: error.message }
+  }
+}
+
+const SOCIAL = {
+  x: { name: 'X', pagesPerRun: 20, page: xPage,
+    searches: rule => { const query = xQuery(rule.logic); return query ? [{ key: rule.bucket_name, query }] : [] } },
+  // Each Bluesky account or list is its own search with its own cursor (see blueskySearches).
+  bluesky: { name: 'Bluesky', pagesPerRun: 100, page: blueskyPage,
+    searches: rule => blueskySearches(rule.logic).map(search => ({ ...search, key: [rule.bucket_name, search.author && `@${search.author}`, search.list].filter(Boolean).join(' ') })) },
+}
+
+async function collectSocial(lane, project, log, signal) {
+  const { name, pagesPerRun, page, searches } = SOCIAL[lane]
+  const pausedUntil = await getSetting(`${lane}_paused_until`)
+  if (pausedUntil && pausedUntil > now()) return `${name} paused until ${new Date(pausedUntil).toLocaleTimeString()} after it limited requests.`
+  const upsert = await itemUpserter(project.project_id)
+  const cursors = { ...project[`${lane}_cursors`] }
+  const intervalMs = Math.max(project.polling_config[`${lane}_interval_minutes`] || 60, 15) * 60_000
+  const errors = [], work = []
+  for (const rule of project.watchlists.filter(r => r.lane === lane && r.enabled)) {
+    const list = searches(rule)
+    if (!list.length) errors.push(`${rule.bucket_name}: no search or accounts`)
+    for (const search of list) {
+      // Rules saved without a start begin on their first run. A new start date restarts the rule from there.
+      const since = rule.logic[`${lane}_since`] || cursors[search.key]?.since || now()
+      const cursor = cursors[search.key]?.since === since && cursors[search.key].holes ? cursors[search.key] : { since, high: since, holes: [], quiet: 0 }
+      cursors[search.key] = openHole(cursor, Date.now(), intervalMs)
+      work.push({ rule, search, seen: new Set() })
+    }
+  }
+  for (let pages = 0; pages < pagesPerRun; pages++) {
+    if (signal.aborted) throw new DOMException('Collection stopped', 'AbortError')
+    const next = work.filter(w => !w.failed && cursors[w.search.key].holes.length)
+      .sort((a, b) => cursors[b.search.key].holes[0].to.localeCompare(cursors[a.search.key].holes[0].to))[0]
+    if (!next) break
+    const { rule, search, seen } = next
+    const hole = cursors[search.key].holes[0]
+    const result = await withBudget(lane, () => page(project, rule, search, hole))
+    if (!result) { errors.push(`${name} budget is used up for now; collection continues next run.`); break }
+    if (result.limited) {
+      const until = result.limited > Date.now() ? result.limited : Date.now() + BUDGETS[lane].windowMs
+      await setSetting(`${lane}_paused_until`, new Date(until).toISOString())
+      errors.push(`${name} is limiting requests; the ${name} lane waits until ${new Date(until).toLocaleTimeString()}.`)
+      break
+    }
+    if (result.error) {
+      errors.push(`${rule.bucket_name}: ${result.error}`)
+      if (result.stop) break
+      next.failed = true // tried again next run
+      continue
+    }
+    log.checked_count++
+    const fresh = result.items.filter(item => item.datetime_utc >= hole.from && !seen.has(item.item_id))
+    for (const item of fresh) seen.add(item.item_id)
+    const done = result.done || result.items.some(item => item.datetime_utc < hole.from)
+    cursors[search.key] = fillHole(cursors[search.key], fresh, { next: result.next, done })
+    await enrichItems(fresh, signal)
+    log.fetch_count += fresh.length
+    log.new_count += (await upsert(fresh, !!project.sheet_sink)).length
+    await patchProject(project.project_id, { [`${lane}_cursors`]: cursors })
+    await saveLogProgress(log)
+  }
+  await patchProject(project.project_id, { [`${lane}_cursors`]: cursors, [`last_${lane}_collected_at`]: now() })
+  return errors.length ? errors.join('; ') : null
+}
+
 // ── Runs ─────────────────────────────────────────────────────────────────────
-const LANES = { events: p => collectGdelt('events', ...p), gkg: p => collectGdelt('gkg', ...p), rss: p => collectRss(...p), mediacloud: p => collectMediaCloud(...p) }
+const LANES = { events: p => collectGdelt('events', ...p), gkg: p => collectGdelt('gkg', ...p), rss: p => collectRss(...p), mediacloud: p => collectMediaCloud(...p),
+  x: p => collectSocial('x', ...p), bluesky: p => collectSocial('bluesky', ...p) }
 const running = new Map() // log_id → AbortController, for runs in this context
 
 channel?.addEventListener('message', ({ data }) => { if (data?.type === 'cancel') running.get(data.logId)?.abort() })
@@ -251,7 +418,8 @@ function runLane(projectId, lane) {
     : work()
 }
 
-const enabledLanes = p => [['events', p.events_enabled], ['gkg', p.doc_enabled], ['rss', p.rss_enabled], ['mediacloud', p.mediacloud_enabled]]
+const enabledLanes = p => [['events', p.events_enabled], ['gkg', p.doc_enabled], ['rss', p.rss_enabled], ['mediacloud', p.mediacloud_enabled], ['x', p.x_enabled],
+  ['bluesky', p.bluesky_enabled]]
   .filter(([, on]) => on).map(([lane]) => lane)
 
 // "Run now": every enabled lane. Returns false when the project is paused or has no enabled lane.
@@ -276,6 +444,8 @@ export async function collectDue(nowMs = Date.now()) {
       gkg: pc.doc_enabled && (behind('gkg', pc.doc_interval_minutes) || elapsed(project.last_doc_polled_at, pc.doc_interval_minutes)),
       rss: pc.rss_enabled && elapsed(project.last_rss_collected_at, pc.rss_interval_minutes),
       mediacloud: pc.mediacloud_enabled && elapsed(project.last_mediacloud_collected_at, pc.mediacloud_interval_minutes),
+      x: pc.x_enabled && elapsed(project.last_x_collected_at, Math.max(pc.x_interval_minutes, 15)),
+      bluesky: pc.bluesky_enabled && elapsed(project.last_bluesky_collected_at, Math.max(pc.bluesky_interval_minutes, 15)),
     }
     for (const [lane, go] of Object.entries(due)) if (go) runLane(project.project_id, lane)
   }

@@ -1,13 +1,13 @@
 {
   "manifest_version": 3,
   "name": "Canary",
-  "version": "0.2.0",
-  "description": "Collects and triages GDELT events, GKG articles, Google News and Media Cloud results for your projects, stored in this browser.",
+  "version": "0.3.0",
+  "description": "Collects and triages GDELT events, GKG articles, Google News, Media Cloud, X and Bluesky results for your projects, stored in this browser.",
   "icons": { "128": "canary.png" },
   "action": { "default_title": "Open Canary", "default_icon": "canary.png" },
   "background": { "service_worker": "background.js" },
   "content_security_policy": { "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'" },
-  "permissions": ["alarms", "offscreen", "unlimitedStorage", "downloads", "downloads.open", "pageCapture"],
+  "permissions": ["alarms", "offscreen", "unlimitedStorage", "downloads", "downloads.open", "pageCapture", "scripting"],
   "host_permissions": [
     "https://data.gdeltproject.org/*",
     "https://news.google.com/*",

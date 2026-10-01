@@ -72,6 +72,7 @@ describe('ProjectSettings Media Cloud rule transaction', () => {
       }
       if (url.pathname === '/api/nlp/status') return json({ ner_present: false, sentiment_present: false })
       if (url.pathname === '/api/presets') return json([])
+      if (url.pathname === '/api/social-budgets') return json({ x: { per: 20 }, bluesky: { per: 300 } })
       if (url.pathname === '/api/mediacloud/status') return json({ configured: true, source: 'local' })
       if (url.pathname === '/api/mediacloud/collections') return json({ collections: [collectionB] })
       if (url.pathname === '/api/projects/project-1' && options.method === 'PUT') {

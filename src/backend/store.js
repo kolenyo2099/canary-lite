@@ -12,7 +12,8 @@ const view = ({ semantic_embedding, ...item }) => item
 
 // ── Projects ─────────────────────────────────────────────────────────────────
 const DEFAULT_POLLING = { events_interval_minutes: 30, doc_interval_minutes: 60, overlap_minutes: 15, events_enabled: true, doc_enabled: false,
-  rss_interval_minutes: 60, rss_enabled: false, mediacloud_interval_minutes: 1440, mediacloud_enabled: false, paused: false }
+  rss_interval_minutes: 60, rss_enabled: false, mediacloud_interval_minutes: 1440, mediacloud_enabled: false, x_interval_minutes: 60, x_enabled: false,
+  bluesky_interval_minutes: 60, bluesky_enabled: false, paused: false }
 
 // (bucket_name, lane) is a rule's identity; the last definition wins, as on desktop.
 function dedupeWatchlists(rules = []) {
@@ -34,7 +35,7 @@ export async function createProject(data) {
     sheet_sink: data.sheet_sink || null, created_at: created, collecting_since: data.collecting_since || created,
     last_events_url: null, last_events_translation_url: null, last_events_collected_at: null, last_doc_collected_at: null,
     last_doc_translation_collected_at: null, last_doc_polled_at: null, last_rss_collected_at: null, last_mediacloud_collected_at: null,
-    rss_cursors: {},
+    last_x_collected_at: null, last_bluesky_collected_at: null, rss_cursors: {}, x_cursors: {}, bluesky_cursors: {},
   }
   await put('projects', project)
   return project
@@ -43,9 +44,11 @@ export async function createProject(data) {
 export async function updateProject(id, data) {
   const project = await getProject(id)
   if (!project) return null
-  for (const key of ['name', 'countries_focus', 'polling_config', 'mediacloud_collections', 'collecting_since']) {
+  for (const key of ['name', 'countries_focus', 'mediacloud_collections', 'collecting_since']) {
     if (data[key] != null) project[key] = data[key]
   }
+  // Projects saved before a lane existed have no settings for it.
+  if (data.polling_config != null) project.polling_config = { ...DEFAULT_POLLING, ...data.polling_config }
   if (data.watchlists) project.watchlists = dedupeWatchlists(data.watchlists)
   if (data.clear_sheet_sink) project.sheet_sink = null
   else if (data.sheet_sink) project.sheet_sink = data.sheet_sink

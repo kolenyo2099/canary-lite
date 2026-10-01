@@ -21,11 +21,17 @@
   let docEnabled = false
   let rssEnabled = false
   let mediacloudEnabled = false
+  let xEnabled = false
+  let blueskyEnabled = false
   let mediacloudCollections = []
   let legacyMediaCloudCollections = []
   let eventsInterval = 30
   let docInterval = 60
   let rssInterval = 60
+  let xInterval = 60
+  let blueskyInterval = 60
+  let xBudget = 20
+  let blueskyBudget = 300
   let scriptCopied = false
 
   // Apps Script that users paste into their Google Sheet's bound script editor.
@@ -228,11 +234,15 @@ function doPost(e) {
     docEnabled = project.polling_config?.doc_enabled ?? false
     rssEnabled = project.polling_config?.rss_enabled ?? false
     mediacloudEnabled = project.polling_config?.mediacloud_enabled ?? false
+    xEnabled = project.polling_config?.x_enabled ?? false
+    blueskyEnabled = project.polling_config?.bluesky_enabled ?? false
     legacyMediaCloudCollections = cloneMediaCloudCollections(project.mediacloud_collections || [])
     recomputeMediaCloudCollections(legacyMediaCloudCollections)
     eventsInterval = project.polling_config?.events_interval_minutes ?? 30
     docInterval = project.polling_config?.doc_interval_minutes ?? 60
     rssInterval = project.polling_config?.rss_interval_minutes ?? 60
+    xInterval = project.polling_config?.x_interval_minutes ?? 60
+    blueskyInterval = project.polling_config?.bluesky_interval_minutes ?? 60
     sheetUrl = project.sheet_sink?.url || ''
     sheetToken = project.sheet_sink?.token || ''
     sheetPageUrl = project.sheet_sink?.sheet_url || ''
@@ -255,11 +265,32 @@ function doPost(e) {
     }
   }
 
+  // X rules read x.com in this browser, so turning the lane on asks Chrome for access (again, if it was removed).
+  function allowXOnEnable(event) {
+    if (!event.currentTarget.checked) return
+    api.allowX().then(result => {
+      if (result.ok) return
+      xEnabled = false
+      notify('error', result.error)
+    })
+  }
+
+  // X and Bluesky budgets are shared by all projects, so they save as they change rather than with the project.
+  async function saveBudget(lane, per) {
+    const result = await api.setSocialBudget(lane, per)
+    if (!result.ok) notify('error', result.error)
+  }
+
   onMount(async () => {
     await loadOntology()
     populateForm($currentProject)
     const res = await api.getTitleEnrichment()
     if (res.ok) titleEnrichment = res.data
+    const budgets = await api.getSocialBudgets()
+    if (budgets.ok) {
+      xBudget = budgets.data.x.per
+      blueskyBudget = budgets.data.bluesky.per
+    }
   })
 
   // NOTE: No reactive $: populateForm here — that would reset local edits
@@ -329,6 +360,8 @@ function doPost(e) {
     const editedBucket = editingRuleIdx !== null ? watchlists[editingRuleIdx]?.bucket_name : null
     const rssChanged = savedLaneWasAddedOrChanged(newRules, 'rss', editedBucket)
     const mediaCloudChanged = savedLaneWasAddedOrChanged(newRules, 'mediacloud', editedBucket)
+    const xChanged = savedLaneWasAddedOrChanged(newRules, 'x', editedBucket)
+    const blueskyChanged = savedLaneWasAddedOrChanged(newRules, 'bluesky', editedBucket)
     const savedLanes = new Set(newRules.map(rule => rule.lane))
     watchlists = [
       ...watchlists.filter((rule, idx) => {
@@ -345,6 +378,8 @@ function doPost(e) {
     ]
     recomputeMediaCloudCollections()
     if (rssChanged) rssEnabled = true
+    if (xChanged) xEnabled = true
+    if (blueskyChanged) blueskyEnabled = true
     const enableMediaCloud = reconcileMediaCloudLaneAfterRuleMutation(
       mediaCloudChanged,
       true,
@@ -356,6 +391,8 @@ function doPost(e) {
       enableLanes: [
         ...(rssChanged ? ['rss'] : []),
         ...(enableMediaCloud ? ['mediacloud'] : []),
+        ...(xChanged ? ['x'] : []),
+        ...(blueskyChanged ? ['bluesky'] : []),
       ],
     })
   }
@@ -413,10 +450,14 @@ function doPost(e) {
         doc_enabled: docEnabled,
         rss_enabled: rssEnabled,
         mediacloud_enabled: mediacloudEnabled,
+        x_enabled: xEnabled,
+        bluesky_enabled: blueskyEnabled,
         events_interval_minutes: eventsInterval,
         doc_interval_minutes: docInterval,
         rss_interval_minutes: rssInterval,
         mediacloud_interval_minutes: 1440,
+        x_interval_minutes: xInterval,
+        bluesky_interval_minutes: blueskyInterval,
         overlap_minutes: 15,
       },
       mediacloud_collections: mediacloudCollections,
@@ -444,6 +485,8 @@ function doPost(e) {
     for (const lane of enableLanes) {
       if (lane === 'rss') pendingRulePollingOverrides.rss_enabled = true
       if (lane === 'mediacloud') pendingRulePollingOverrides.mediacloud_enabled = true
+      if (lane === 'x') pendingRulePollingOverrides.x_enabled = true
+      if (lane === 'bluesky') pendingRulePollingOverrides.bluesky_enabled = true
     }
     rulesSaveRequested += 1
     if (!rulesSaveTask) {
@@ -711,6 +754,32 @@ function doPost(e) {
         <div class="form-label">Media Cloud interval</div>
         <div class="form-hint">Once daily (1,440 minutes), with a one-day overlap.</div>
       </div>
+      <div class="toggle-row">
+        <label class="toggle-label">
+          <input type="checkbox" bind:checked={xEnabled} on:change={allowXOnEnable} />
+          X lane
+        </label>
+      </div>
+      <div class="form-group">
+        <label for="x-interval">X interval (minutes)</label>
+        <input id="x-interval" type="number" class="form-input form-input--sm" bind:value={xInterval} min="15" max="1440" />
+        <label for="x-budget">X searches per 15 minutes, all projects</label>
+        <input id="x-budget" type="number" class="form-input form-input--sm" bind:value={xBudget} min="1" max="50" on:change={() => saveBudget('x', xBudget)} />
+        <p class="form-hint">X rules search x.com in a background tab of this browser, signed in as you, and collect every post since the last run; quiet searches are checked less often. X allows about 50 searches per 15 minutes per account, and staying well under that keeps your account safe. Past the budget, collection slows down instead of searching more.</p>
+      </div>
+      <div class="toggle-row">
+        <label class="toggle-label">
+          <input type="checkbox" bind:checked={blueskyEnabled} />
+          Bluesky lane
+        </label>
+      </div>
+      <div class="form-group">
+        <label for="bluesky-interval">Bluesky interval (minutes)</label>
+        <input id="bluesky-interval" type="number" class="form-input form-input--sm" bind:value={blueskyInterval} min="15" max="1440" />
+        <label for="bluesky-budget">Bluesky requests per 5 minutes, all projects</label>
+        <input id="bluesky-budget" type="number" class="form-input form-input--sm" bind:value={blueskyBudget} min="1" max="3000" on:change={() => saveBudget('bluesky', blueskyBudget)} />
+        <p class="form-hint">Bluesky rules search Bluesky's API as the account connected in the Bluesky rule editor and collect every post since the last run; quiet searches are checked less often. Bluesky allows 3,000 requests per 5 minutes per internet connection, shared with your own use.</p>
+      </div>
     </div>
   </section>
 
@@ -906,6 +975,8 @@ function doPost(e) {
   .lane-badge--doc { background: #d1fae5; color: #065f46; }
   .lane-badge--rss { background: var(--accent-soft); color: var(--accent-strong); }
   .lane-badge--mediacloud { background: #ede9fe; color: #5b21b6; }
+  .lane-badge--x { background: #e5e7eb; color: #111827; }
+  .lane-badge--bluesky { background: #dbeafe; color: #1d4ed8; }
   .lane-badge--context { background: #fef3c7; color: #92400e; }
   .rule-lane-header {
     color: var(--text-muted); font-size: 0.68rem; font-weight: 700;

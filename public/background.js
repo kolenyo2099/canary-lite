@@ -27,6 +27,28 @@ async function sendToCollector(type, projectId) {
   return result
 }
 
+// X lane: the collector asks for one search at a time. It opens in a background tab with the user's own x.com session,
+// where x-hook.js keeps what X's web app receives. Offscreen documents cannot open tabs, so this runs here.
+const X_ACCESS = { origins: ['https://x.com/*'] }
+const X_HOOK = { id: 'x-hook', matches: ['https://x.com/*'], js: ['x-hook.js'], runAt: 'document_start', world: 'MAIN' }
+async function readX(url) {
+  if (!await chrome.permissions.contains(X_ACCESS)) return { error: 'Canary has no access to x.com. Turn the X lane off and on in Project Settings to allow it.', stop: true }
+  if (!(await chrome.scripting.getRegisteredContentScripts({ ids: [X_HOOK.id] })).length) await chrome.scripting.registerContentScripts([X_HOOK])
+  const tab = await chrome.tabs.create({ url, active: false })
+  try {
+    for (let second = 0; second < 30; second++) {
+      await new Promise(resolve => setTimeout(resolve, 1000))
+      const current = (await chrome.tabs.get(tab.id)).url
+      if (current && !current.startsWith('https://x.com/search')) return { error: 'X asked to sign in. Sign in to x.com in this browser.', stop: true }
+      const [injection] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, world: 'MAIN', func: () => window.__canaryX }).catch(() => [])
+      if (injection?.result?.length) return { responses: injection.result }
+    }
+    return { error: 'X showed no search results within 30 seconds. Check that you are signed in to x.com in this browser.' }
+  } finally {
+    chrome.tabs.remove(tab.id).catch(() => {})
+  }
+}
+
 chrome.alarms.onAlarm.addListener(async ({ name }) => {
   if (name !== 'collect') return
   try {
@@ -44,6 +66,10 @@ chrome.runtime.onMessage.addListener((message, _sender, reply) => {
     // Keep long model downloads between the app and offscreen document, so
     // they do not depend on the service worker's maximum event lifetime.
     ensureOffscreen().then(() => reply({ ready: true }), error => reply({ error: error.message || String(error) }))
+    return true
+  }
+  if (message.type === 'x-read') {
+    readX(message.url).then(reply, error => reply({ error: error.message || String(error) }))
     return true
   }
   if (message.type !== 'run-now') return

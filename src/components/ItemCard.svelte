@@ -573,6 +573,8 @@
   .badge--gkg     { background: #ede9fe; color: #5b21b6; }
   .badge--rss     { background: var(--accent-soft); color: var(--accent-strong); }
   .badge--mediacloud { background: #ede9fe; color: #5b21b6; }
+  .badge--x { background: #e5e7eb; color: #111827; }
+  .badge--bluesky { background: #dbeafe; color: #1d4ed8; }
   .badge--context { background: #ede9fe; color: #5b21b6; }
 
   .match-reason {

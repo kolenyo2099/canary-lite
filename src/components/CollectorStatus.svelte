@@ -10,6 +10,8 @@
   let lastGkgLog = null
   let lastRssLog = null
   let lastMediaCloudLog = null
+  let lastXLog = null
+  let lastBlueskyLog = null
   let isTriggering = false
   let isPausing = false
   let interval = null
@@ -74,23 +76,45 @@
     }
   }
 
+  // X and Bluesky: a pause, the oldest stretch not collected yet, and the request budget shared by all projects.
+  let socialBudgets = {}
+  function socialState(lane, project, budgets) {
+    if (!project?.polling_config?.[`${lane}_enabled`]) return null
+    const budget = budgets[lane]
+    const paused = budget?.paused_until && Date.parse(budget.paused_until) > Date.now()
+    const oldest = Object.values(project[`${lane}_cursors`] || {}).flatMap(cursor => cursor.holes || []).map(hole => hole.from).sort()[0]
+    const behind = oldest && Date.now() - Date.parse(oldest) > 2 * Math.max(project.polling_config[`${lane}_interval_minutes`] || 60, 15) * 60_000
+    const label = [
+      paused && `Paused until ${new Date(budget.paused_until).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`,
+      behind && `Catching up from ${new Date(oldest).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}`,
+      budget && `${budget.used}/${budget.per} requests per ${budget.minutes} min`,
+    ].filter(Boolean).join(' · ')
+    return label && { label, title: 'The request budget is shared by all projects. Past it, collection slows down instead of sending more requests.' }
+  }
+  $: xSocial = socialState('x', $currentProject, socialBudgets)
+  $: blueskySocial = socialState('bluesky', $currentProject, socialBudgets)
+
   $: eventsCatchUp = catchUpState('events')
   $: gkgCatchUp = catchUpState('gkg')
 
   async function load() {
     if (!projectId) return
     const requestedProjectId = projectId
-    const [result, projectResult] = await Promise.all([
+    const [result, projectResult, budgetResult] = await Promise.all([
       api.getLogs(projectId, 20),
       api.getProject(projectId),
+      api.getSocialBudgets(),
     ])
     if (requestedProjectId !== projectId) return
+    if (budgetResult.ok) socialBudgets = budgetResult.data
     if (result.ok) {
       logs = result.data
       lastEventsLog = logs.find(l => l.lane === 'events')
       lastGkgLog    = logs.find(l => l.lane === 'gkg')
       lastRssLog    = logs.find(l => l.lane === 'rss')
       lastMediaCloudLog = logs.find(l => l.lane === 'mediacloud')
+      lastXLog = logs.find(l => l.lane === 'x')
+      lastBlueskyLog = logs.find(l => l.lane === 'bluesky')
     }
     if (projectResult.ok) currentProject.set(projectResult.data)
   }
@@ -239,6 +263,44 @@
       <span class="lane-time muted">{$currentProject?.polling_config?.mediacloud_enabled ? 'no runs yet' : 'disabled'}</span>
     {/if}
   </div>
+  <div class="lane-row">
+    <span class="lane-name">X</span>
+    {#if lastXLog}
+      <span class="lane-time" title={fmt(lastXLog.finished_at)}>
+        {relativeTime(lastXLog.finished_at)}
+      </span>
+      <span class="lane-counts">+{lastXLog.new_count} new</span>
+      {#if lastXLog.error}
+        <span class="lane-error" title={lastXLog.error}>⚠</span>
+      {:else}
+        <span class="lane-ok">✓</span>
+      {/if}
+    {:else}
+      <span class="lane-time muted">{$currentProject?.polling_config?.x_enabled ? 'no runs yet' : 'disabled'}</span>
+    {/if}
+  </div>
+  {#if xSocial}
+    <div class="catch-up" title={xSocial.title}>{xSocial.label}</div>
+  {/if}
+  <div class="lane-row">
+    <span class="lane-name">Bluesky</span>
+    {#if lastBlueskyLog}
+      <span class="lane-time" title={fmt(lastBlueskyLog.finished_at)}>
+        {relativeTime(lastBlueskyLog.finished_at)}
+      </span>
+      <span class="lane-counts">+{lastBlueskyLog.new_count} new</span>
+      {#if lastBlueskyLog.error}
+        <span class="lane-error" title={lastBlueskyLog.error}>⚠</span>
+      {:else}
+        <span class="lane-ok">✓</span>
+      {/if}
+    {:else}
+      <span class="lane-time muted">{$currentProject?.polling_config?.bluesky_enabled ? 'no runs yet' : 'disabled'}</span>
+    {/if}
+  </div>
+  {#if blueskySocial}
+    <div class="catch-up" title={blueskySocial.title}>{blueskySocial.label}</div>
+  {/if}
 </div>
 
 <style>
