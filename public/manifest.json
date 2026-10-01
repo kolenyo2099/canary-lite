@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Canary",
   "version": "0.3.0",
-  "description": "Collects and triages GDELT events, GKG articles, Google News, Media Cloud, X and Bluesky results for your projects, stored in this browser.",
+  "description": "Collects and triages GDELT events, GKG articles, Google News, Media Cloud, X, Bluesky and Telegram results for your projects, stored in this browser.",
   "icons": { "128": "canary.png" },
   "action": { "default_title": "Open Canary", "default_icon": "canary.png" },
   "background": { "service_worker": "background.js" },

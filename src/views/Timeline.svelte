@@ -586,6 +586,7 @@
   .badge--mediacloud { background: #ede9fe; color: #5b21b6; }
   .badge--x { background: #e5e7eb; color: #111827; }
   .badge--bluesky { background: #dbeafe; color: #1d4ed8; }
+  .badge--telegram { background: #e0f2fe; color: #0369a1; }
 
   .tl-title {
     color: var(--text);

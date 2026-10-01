@@ -5,7 +5,7 @@
  */
 import * as store from './backend/store.js'
 import { ontology, searchThemes } from './backend/ontology.js'
-import { runProjectNow, channel, BUDGETS, budgetUsed } from './backend/collect.js'
+import { runProjectNow, channel, BUDGETS, budgetUsed, BROKEN_LANES } from './backend/collect.js'
 import { sendToSheet } from './backend/sheets.js'
 import { validateToken, collectionSearch, configuredToken, TOKEN_SETTING } from './backend/mediacloud.js'
 import { BLUESKY_ACCOUNT, blueskySignIn } from './backend/bluesky.js'
@@ -141,13 +141,14 @@ export const api = {
     })
   },
 
-  // X rules open their searches on x.com in this browser; Chrome asks once for access to x.com.
-  allowX: () => {
-    const granted = inExtension ? chrome.permissions.request({ origins: ['https://x.com/*'] }) : Promise.resolve(true)
-    return call(async () => { if (!await granted) throw new HttpError(403, 'Chrome did not grant access to x.com') })
+  // X rules open their searches on x.com in this browser and Telegram rules read t.me; Chrome asks once for each site.
+  allowSites: origins => {
+    const granted = inExtension ? chrome.permissions.request({ origins }) : Promise.resolve(true)
+    const names = origins.map(origin => new URL(origin.replace('*', '')).hostname).join(' and ')
+    return call(async () => { if (!await granted) throw new HttpError(403, `Chrome did not grant access to ${names}`) })
   },
 
-  // X and Bluesky each have one request budget shared by all projects (see BUDGETS in collect.js).
+  // X, Bluesky and Telegram each have one request budget shared by all projects (see BUDGETS in collect.js).
   getSocialBudgets: () => call(async () => {
     const budgets = {}
     for (const lane of Object.keys(BUDGETS)) {
@@ -161,6 +162,9 @@ export const api = {
     if (!BUDGETS[lane] || !(Number(per) >= 1)) throw new HttpError(400, 'Enter how many requests to allow')
     await setSetting(`${lane}_budget_per`, Math.round(Number(per)))
   }),
+
+  // Lanes whose source changed its format (see BROKEN_LANES in collect.js).
+  getBrokenLanes: () => call(async () => await getSetting(BROKEN_LANES) || {}),
 
   // Bluesky search needs a signed-in account: a handle and an app password, checked here and kept in this browser.
   getBlueskyStatus: () => call(async () => ({ handle: (await getSetting(BLUESKY_ACCOUNT))?.identifier || null })),

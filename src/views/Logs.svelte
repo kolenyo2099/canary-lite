@@ -143,6 +143,7 @@
   .lane-badge--mediacloud { background: #ede9fe; color: #5b21b6; }
   .lane-badge--x { background: #e5e7eb; color: #111827; }
   .lane-badge--bluesky { background: #dbeafe; color: #1d4ed8; }
+  .lane-badge--telegram { background: #e0f2fe; color: #0369a1; }
   .mono { font-family: monospace; font-size: 0.78rem; }
   .highlight-new { color: #16a34a; font-weight: 600; }
   .status-ok { color: #16a34a; font-size: 0.8rem; }

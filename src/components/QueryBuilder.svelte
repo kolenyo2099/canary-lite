@@ -15,6 +15,7 @@
   import BlueskyAccount from './BlueskyAccount.svelte'
   import { xQuery, xSearchUrl, X_LIST } from '../backend/x.js'
   import { blueskySearches, blueskyLabel, blueskyWebUrl, BLUESKY_LIST } from '../backend/bluesky.js'
+  import { telegramChannels, telegramKeywords, telegramUrl } from '../backend/telegram.js'
 
   export let rule = null
   export let siblingRule = null  // legacy prop retained for compatibility
@@ -27,7 +28,7 @@
 
   // ── Shared state ─────────────────────────────────────────────────────────────
   let ruleName = rule?.bucket_name || ''
-  let activeTab = ['rss', 'mediacloud', 'x', 'bluesky'].includes(rule?.lane)
+  let activeTab = ['rss', 'mediacloud', 'x', 'bluesky', 'telegram'].includes(rule?.lane)
     ? rule.lane
     : ((rule?.lane === 'doc' || rule?.lane === 'context') ? 'doc' : 'events')
   let nameError = ''
@@ -60,6 +61,7 @@
   const _mediacloudRule = _bucketRules.find(r => r.lane === 'mediacloud') || null
   const _xRule = _bucketRules.find(r => r.lane === 'x') || null
   const _blueskyRule = _bucketRules.find(r => r.lane === 'bluesky') || null
+  const _telegramRule = _bucketRules.find(r => r.lane === 'telegram') || null
   let mediaCloudDraftCollections = cloneMediaCloudCollections(
     mediaCloudCollectionsForRule(_mediacloudRule, mediaCloudCollections)
   )
@@ -71,19 +73,22 @@
     if (lane === 'mediacloud') return _mediacloudRule
     if (lane === 'x') return _xRule
     if (lane === 'bluesky') return _blueskyRule
+    if (lane === 'telegram') return _telegramRule
     return null
   }
 
-  // ── X and Bluesky tab state ──────────────────────────────────────────────────
-  // Both take a search, accounts and a start. datetime-local fields hold local wall time; the rule stores UTC.
-  const SOCIAL_LANES = ['x', 'bluesky']
+  // ── X, Bluesky and Telegram tab state ────────────────────────────────────────
+  // Each takes a search (for Telegram, keywords), accounts (channels) and a start. datetime-local fields hold local wall time; the rule stores UTC.
+  const SOCIAL_LANES = ['x', 'bluesky', 'telegram']
+  const SOCIAL_NAMES = { x: 'X', bluesky: 'Bluesky', telegram: 'Telegram' }
+  const SOCIAL_SITES = { x: 'x.com', bluesky: 'bsky.app', telegram: 't.me' }
   const localInput = iso => { const d = new Date(iso); return new Date(d - d.getTimezoneOffset() * 60_000).toISOString().slice(0, 16) }
   function socialForm(lane) {
     const logic = existingRuleForLane(lane)?.logic || {}
     return { search: logic[`${lane}_query`] || '', accounts: (logic[`${lane}_accounts`] || []).join(', '),
       savedSince: logic[`${lane}_since`], since: localInput(logic[`${lane}_since`] || Date.now()), error: '' }
   }
-  let social = { x: socialForm('x'), bluesky: socialForm('bluesky') }
+  let social = { x: socialForm('x'), bluesky: socialForm('bluesky'), telegram: socialForm('telegram') }
   // The field drops seconds; keep the saved start unless it was changed, since a new start restarts the rule's backfill.
   function socialLogic(lane, form = social[lane]) {
     const since = form.savedSince && form.since === localInput(form.savedSince) ? form.savedSince : form.since ? new Date(form.since).toISOString() : null
@@ -92,12 +97,20 @@
   // What a rule will search, as typed on the service's own site.
   function socialSearches(lane, logic) {
     if (lane === 'bluesky') return blueskySearches(logic).map(search => ({ text: blueskyLabel(search), url: blueskyWebUrl(search) }))
+    if (lane === 'telegram') {
+      const keywords = telegramKeywords(logic)
+      return telegramChannels(logic).map(channel => ({ text: `@${channel}${keywords.length ? `, posts with: ${keywords.join(' OR ')}` : ''}`, url: telegramUrl(channel) }))
+    }
     const query = xQuery(logic)
     return query ? [{ text: query, url: xSearchUrl(query).split('#')[0] }] : []
   }
   $: socialPreview = SOCIAL_LANES.includes(activeTab) ? socialSearches(activeTab, socialLogic(activeTab, social[activeTab])) : []
   // What a rule costs each run, with a nudge toward a list when it follows many accounts.
   function socialCost(lane, logic) {
+    if (lane === 'telegram') {
+      const channels = telegramChannels(logic).length
+      return `${channels} channel${channels === 1 ? '' : 's'}: a page each per run, more while catching up. A new channel goes back at most 30 days.`
+    }
     const accounts = logic[`${lane}_accounts`].filter(entry => !(lane === 'x' ? X_LIST : BLUESKY_LIST).test(entry)).length
     const searches = socialSearches(lane, logic).length
     if (lane === 'bluesky' && accounts > 3) return `${searches} searches each run, one per account. A list does it in one: add these accounts to a list on bsky.app and paste its link here.`
@@ -1085,7 +1098,7 @@
     if (lane === 'doc') return buildDocLogic()
     if (SOCIAL_LANES.includes(lane)) {
       const logic = socialLogic(lane)
-      return { ...logic, description: `${lane === 'x' ? 'X' : 'Bluesky'}: ${socialSearches(lane, logic).map(search => search.text).join('; ')}` }
+      return { ...logic, description: `${SOCIAL_NAMES[lane]}: ${socialSearches(lane, logic).map(search => search.text).join('; ')}` }
     }
     if (lane === 'rss' || lane === 'mediacloud') {
       return preserveUnknownHeadlineLogic(lane, buildHeadlineLogic(lane))
@@ -1094,7 +1107,7 @@
   }
 
   function lanesToSave() {
-    return ['events', 'doc', 'rss', 'mediacloud', 'x', 'bluesky'].filter(lane =>
+    return ['events', 'doc', 'rss', 'mediacloud', 'x', 'bluesky', 'telegram'].filter(lane =>
       existingRuleForLane(lane) || touchedLanes.has(lane) || (lane === activeTab && !rule)
     )
   }
@@ -1146,7 +1159,7 @@
   function save() {
     nameError = ''
     mediaCloudError = ''
-    social.x.error = social.bluesky.error = ''
+    social.x.error = social.bluesky.error = social.telegram.error = ''
     if (!ruleName.trim()) {
       nameError = 'Rule name is required'
       return
@@ -1164,7 +1177,7 @@
     const empty = rules.find(savedRule => SOCIAL_LANES.includes(savedRule.lane) && savedRule.enabled !== false && !socialSearches(savedRule.lane, savedRule.logic).length)
     if (empty) {
       activeTab = empty.lane
-      social[empty.lane].error = 'Enter a search, at least one account, or both.'
+      social[empty.lane].error = empty.lane === 'telegram' ? 'Enter at least one public channel.' : 'Enter a search, at least one account, or both.'
       return
     }
     if (rules.some(savedRule => savedRule.lane === 'bluesky' && savedRule.enabled !== false && mixesListAndSearch(savedRule.logic))) {
@@ -1172,11 +1185,12 @@
       social.bluesky.error = 'A Bluesky list brings every post by its members and cannot be narrowed by a search. Put the list in a rule of its own.'
       return
     }
-    if (!rules.some(savedRule => savedRule.lane === 'x' && savedRule.enabled !== false)) return onSave(saved)
-    // Chrome asks for access to x.com during this click; once granted it answers at once.
-    api.allowX().then(response => {
+    // Chrome asks for access to x.com or t.me during this click; once granted it answers at once.
+    const sites = rules.filter(savedRule => savedRule.enabled !== false && ['x', 'telegram'].includes(savedRule.lane)).map(savedRule => savedRule.lane)
+    if (!sites.length) return onSave(saved)
+    api.allowSites(sites.map(lane => `https://${SOCIAL_SITES[lane]}/*`)).then(response => {
       if (response.ok) onSave(saved)
-      else { activeTab = 'x'; social.x.error = response.error }
+      else { activeTab = sites[0]; social[sites[0]].error = response.error }
     })
   }
 </script>
@@ -1220,7 +1234,7 @@
                 on:click={() => applyPreset(preset)}
                 title="Load: {preset.name} ({preset.lane})"
               >
-                {preset.lane === 'events' ? '📊' : preset.lane === 'rss' ? '🛰' : preset.lane === 'mediacloud' ? 'MC' : preset.lane === 'x' ? '𝕏' : preset.lane === 'bluesky' ? '🦋' : preset.lane === 'ruleset' ? '📦' : '📰'} {preset.name}
+                {preset.lane === 'events' ? '📊' : preset.lane === 'rss' ? '🛰' : preset.lane === 'mediacloud' ? 'MC' : preset.lane === 'x' ? '𝕏' : preset.lane === 'bluesky' ? '🦋' : preset.lane === 'telegram' ? '✈' : preset.lane === 'ruleset' ? '📦' : '📰'} {preset.name}
               </button>
               <button
                 class="preset-chip-del"
@@ -1303,6 +1317,17 @@
         <span class="tab-label">
           Bluesky
           <span class="tab-sub">Searches and accounts through Bluesky's API</span>
+        </span>
+      </button>
+      <button
+        class="qb-tab"
+        class:active={activeTab === 'telegram'}
+        on:click={() => switchTab('telegram')}
+      >
+        <span class="tab-icon" aria-hidden="true">✈</span>
+        <span class="tab-label">
+          Telegram
+          <span class="tab-sub">Public channels, read without signing in</span>
         </span>
       </button>
     </div>
@@ -1795,6 +1820,11 @@
               On each run Canary opens this search on x.com in a background tab of this browser, signed in as you,
               and collects every post since the last run, about 20 per page load. Sign in to x.com in this Chrome profile first.
             </p>
+          {:else if activeTab === 'telegram'}
+            <p class="qb-explainer">
+              On each run Canary reads each channel's public web preview on t.me, without signing in, and collects every post since
+              the last run, about 20 per page. Telegram has no search across channels, so list the channels to follow.
+            </p>
           {:else}
             <p class="qb-explainer">
               On each run Canary searches Bluesky through its API and collects every post since the last run, up to 100 per request.
@@ -1803,9 +1833,11 @@
           {/if}
 
           <div class="qb-section">
-            <h3 class="qb-section-title">1. Search <span class="optional">{activeTab === 'x' ? 'X' : 'Bluesky'} search syntax</span></h3>
+            <h3 class="qb-section-title">1. {activeTab === 'telegram' ? 'Keywords' : 'Search'} <span class="optional">{activeTab === 'telegram' ? 'optional' : `${SOCIAL_NAMES[activeTab]} search syntax`}</span></h3>
             <p class="qb-section-hint">
-              {#if activeTab === 'x'}
+              {#if activeTab === 'telegram'}
+                Separated by commas. Only posts containing any of them are kept, ignoring case. Leave empty to keep every post.
+              {:else if activeTab === 'x'}
                 Words, "exact phrases", OR, -exclusions and operators such as <code>lang:es</code>, <code>min_faves:10</code> or <code>filter:links</code>.
               {:else}
                 Words, "exact phrases" and operators such as <code>lang:es</code>, <code>domain:apnews.com</code> or <code>#tag</code>.
@@ -1814,26 +1846,29 @@
             <input
               type="text"
               class="qb-input qb-input--wide"
-              placeholder={activeTab === 'x' ? 'e.g. "border closure" OR deportation lang:es' : 'e.g. "border closure" lang:es'}
+              placeholder={{ x: 'e.g. "border closure" OR deportation lang:es', bluesky: 'e.g. "border closure" lang:es', telegram: 'e.g. bridge, мост, міст' }[activeTab]}
               bind:value={social[activeTab].search}
               on:input={editSocial}
             />
           </div>
 
           <div class="qb-section">
-            <h3 class="qb-section-title">2. Accounts <span class="optional">optional</span></h3>
+            <h3 class="qb-section-title">2. {activeTab === 'telegram' ? 'Channels' : 'Accounts'} <span class="optional">{activeTab === 'telegram' ? 'required' : 'optional'}</span></h3>
             <p class="qb-section-hint">
-              Handles or list links, separated by commas or spaces. With a search above, only their posts that match it are kept.
-              {#if activeTab === 'x'}
+              {#if activeTab === 'telegram'}
+                Public channel names or <code>t.me/…</code> links, separated by commas or spaces. Each channel is read on its own.
+              {:else if activeTab === 'x'}
+                Handles or list links, separated by commas or spaces. With a search above, only their posts that match it are kept.
                 A list (<code>x.com/i/lists/…</code>) follows all of its members in one search.
               {:else}
+                Handles or list links, separated by commas or spaces. With a search above, only their posts that match it are kept.
                 A list (<code>bsky.app/profile/…/lists/…</code>) brings every post by its members in one request, so give it a rule without a search.
               {/if}
             </p>
             <input
               type="text"
               class="qb-input qb-input--wide"
-              placeholder={activeTab === 'x' ? 'e.g. @Reuters, @AP' : 'e.g. @reuters.com, @apnews.com'}
+              placeholder={{ x: 'e.g. @Reuters, @AP', bluesky: 'e.g. @reuters.com, @apnews.com', telegram: 'e.g. @durov, t.me/telegram' }[activeTab]}
               bind:value={social[activeTab].accounts}
               on:input={editSocial}
             />
@@ -1851,9 +1886,9 @@
             <h3 class="qb-section-title">4. Preview</h3>
             {#each socialPreview as search}
               <code class="rss-query-code">{search.text}</code>
-              <a class="qb-ref-link" href={search.url} target="_blank" rel="noopener noreferrer">Open on {activeTab === 'x' ? 'x.com' : 'bsky.app'}</a>
+              <a class="qb-ref-link" href={search.url} target="_blank" rel="noopener noreferrer">Open on {SOCIAL_SITES[activeTab]}</a>
             {:else}
-              <p class="qb-section-hint">Enter a search, accounts, or both.</p>
+              <p class="qb-section-hint">{activeTab === 'telegram' ? 'Enter at least one public channel.' : 'Enter a search, accounts, or both.'}</p>
             {/each}
             {#if socialCostNote}<p class="qb-section-hint qb-cost">{socialCostNote}</p>{/if}
             {#if social[activeTab].error}<p class="qb-error" role="alert">{social[activeTab].error}</p>{/if}

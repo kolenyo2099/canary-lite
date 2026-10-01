@@ -13,7 +13,7 @@ const view = ({ semantic_embedding, ...item }) => item
 // ── Projects ─────────────────────────────────────────────────────────────────
 const DEFAULT_POLLING = { events_interval_minutes: 30, doc_interval_minutes: 60, overlap_minutes: 15, events_enabled: true, doc_enabled: false,
   rss_interval_minutes: 60, rss_enabled: false, mediacloud_interval_minutes: 1440, mediacloud_enabled: false, x_interval_minutes: 60, x_enabled: false,
-  bluesky_interval_minutes: 60, bluesky_enabled: false, paused: false }
+  bluesky_interval_minutes: 60, bluesky_enabled: false, telegram_interval_minutes: 60, telegram_enabled: false, paused: false }
 
 // (bucket_name, lane) is a rule's identity; the last definition wins, as on desktop.
 function dedupeWatchlists(rules = []) {
@@ -35,7 +35,8 @@ export async function createProject(data) {
     sheet_sink: data.sheet_sink || null, created_at: created, collecting_since: data.collecting_since || created,
     last_events_url: null, last_events_translation_url: null, last_events_collected_at: null, last_doc_collected_at: null,
     last_doc_translation_collected_at: null, last_doc_polled_at: null, last_rss_collected_at: null, last_mediacloud_collected_at: null,
-    last_x_collected_at: null, last_bluesky_collected_at: null, rss_cursors: {}, x_cursors: {}, bluesky_cursors: {},
+    last_x_collected_at: null, last_bluesky_collected_at: null, last_telegram_collected_at: null, rss_cursors: {}, x_cursors: {}, bluesky_cursors: {},
+    telegram_cursors: {},
   }
   await put('projects', project)
   return project

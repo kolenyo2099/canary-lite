@@ -6,6 +6,7 @@ import { compileQueries, rssWindows, rssUrl, simpleFilterPasses } from './rss.js
 import { fetchForProject, configuredToken } from './mediacloud.js'
 import { xQuery, xSearchUrl, xItems, xWindowSearch } from './x.js'
 import { BLUESKY_ACCOUNT, blueskySearch, blueskyListFeed, blueskySearches, blueskyItems, blueskyLabel, blueskyRate } from './bluesky.js'
+import { telegramChannels, telegramItems, telegramMatches, telegramUrl } from './telegram.js'
 import { decodeEntities } from './gdelt.js'
 import { enrichItems } from './nlp.js'
 
@@ -257,6 +258,8 @@ export function fillHole(cursor, fresh, { next, done } = {}) {
 export const BUDGETS = {
   x: { per: 20, windowMs: 15 * 60_000, gapMs: 15_000, jitterMs: 10_000, daily: 400, reserve: 10 },
   bluesky: { per: 300, windowMs: 5 * 60_000, gapMs: 0, jitterMs: 0, daily: 20_000, reserve: 300 },
+  // Telegram publishes no limit for its web preview; this paces like a person paging back, 2.5 to 4 seconds apart.
+  telegram: { per: 60, windowMs: 5 * 60_000, gapMs: 2_500, jitterMs: 1_500, daily: 5_000, reserve: 0 },
 }
 const MAX_WAIT_MS = 90_000 // a longer wait ends the run instead; collection continues next run
 
@@ -297,12 +300,13 @@ function withBudget(lane, request) {
 async function xPage(project, rule, { query }, hole) {
   if (typeof chrome === 'undefined' || !chrome.runtime?.id) return { error: 'X collection needs the Canary Chrome extension', stop: true }
   const result = await chrome.runtime.sendMessage({ type: 'x-read', url: xSearchUrl(xWindowSearch(query, hole)) }).catch(error => ({ error: error.message }))
-  if (!result?.responses) return { error: result?.error || 'the background collector did not respond', stop: result?.stop }
+  if (!result?.responses) return { error: result?.error || 'the background collector did not respond', stop: result?.stop, formatChanged: result?.formatChanged }
   const last = result.responses.at(-1)
   const rate = last?.remaining ? { remaining: Number(last.remaining), reset: Number(last.reset) * 1000 } : null
   const failed = result.responses.find(r => r.status !== 200)?.status
   if (failed === 429) return { limited: rate?.reset || true, rate }
-  return failed ? { error: `X answered HTTP ${failed}`, rate } : { items: xItems(result.responses, project, rule, query), rate }
+  if (failed) return { error: `X answered HTTP ${failed}`, rate }
+  try { return { items: xItems(result.responses, project, rule, query), rate } } catch (error) { return { error: error.message, formatChanged: error.formatChanged, rate } }
 }
 
 // Bluesky pages come from its API, signed in with the user's app password (see bluesky.js).
@@ -324,16 +328,39 @@ async function blueskyPage(project, rule, search, hole) {
   }
 }
 
+// Telegram pages come from a channel's public web preview, without cookies (see telegram.js). Like a Bluesky list, a
+// channel has no date filter: it pages back by post number until a page passes the hole's start.
+async function telegramPage(project, rule, { channel }, hole) {
+  let response
+  try { response = await fetch(telegramUrl(channel, hole.next), { cache: 'no-store', credentials: 'omit' }) } catch {
+    return { error: 'Canary has no access to t.me. Save a Telegram rule again to allow it.', stop: true }
+  }
+  if (response.status === 429) return { limited: Date.now() + (Number(response.headers.get('retry-after')) || 0) * 1000 }
+  if (!response.ok) return { error: `Telegram answered HTTP ${response.status}` }
+  // Channels without a public preview, and names that do not exist, redirect to the t.me/<channel> landing page.
+  if (!new URL(response.url).pathname.startsWith('/s/')) return { error: `@${channel} has no public web preview` }
+  try {
+    const { items, next } = telegramItems(await response.text(), project, rule, channel)
+    return { items, next, done: !next }
+  } catch (error) { return { error: error.message, formatChanged: error.formatChanged } }
+}
+
 const SOCIAL = {
   x: { name: 'X', pagesPerRun: 20, page: xPage,
     searches: rule => { const query = xQuery(rule.logic); return query ? [{ key: rule.bucket_name, query }] : [] } },
   // Each Bluesky account or list is its own search with its own cursor (see blueskySearches).
   bluesky: { name: 'Bluesky', pagesPerRun: 100, page: blueskyPage,
     searches: rule => blueskySearches(rule.logic).map(search => ({ ...search, key: [rule.bucket_name, search.author && `@${search.author}`, search.list].filter(Boolean).join(' ') })) },
+  // Each channel is its own search. A new channel goes back at most 30 days; keywords filter after the fetch.
+  telegram: { name: 'Telegram', pagesPerRun: 60, page: telegramPage, backfillDays: 30, keep: (rule, item) => telegramMatches(rule.logic, item),
+    searches: rule => telegramChannels(rule.logic).map(channel => ({ channel, key: `${rule.bucket_name} @${channel}` })) },
 }
 
+// Lanes whose source changed its format, with the error, until a page reads fine again (see CollectorStatus).
+export const BROKEN_LANES = 'broken_lanes'
+
 async function collectSocial(lane, project, log, signal) {
-  const { name, pagesPerRun, page, searches } = SOCIAL[lane]
+  const { name, pagesPerRun, page, searches, backfillDays, keep } = SOCIAL[lane]
   const pausedUntil = await getSetting(`${lane}_paused_until`)
   if (pausedUntil && pausedUntil > now()) return `${name} paused until ${new Date(pausedUntil).toLocaleTimeString()} after it limited requests.`
   const upsert = await itemUpserter(project.project_id)
@@ -346,7 +373,8 @@ async function collectSocial(lane, project, log, signal) {
     for (const search of list) {
       // Rules saved without a start begin on their first run. A new start date restarts the rule from there.
       const since = rule.logic[`${lane}_since`] || cursors[search.key]?.since || now()
-      const cursor = cursors[search.key]?.since === since && cursors[search.key].holes ? cursors[search.key] : { since, high: since, holes: [], quiet: 0 }
+      const floor = backfillDays ? new Date(Date.now() - backfillDays * 86_400_000).toISOString() : since
+      const cursor = cursors[search.key]?.since === since && cursors[search.key].holes ? cursors[search.key] : { since, high: since > floor ? since : floor, holes: [], quiet: 0 }
       cursors[search.key] = openHole(cursor, Date.now(), intervalMs)
       work.push({ rule, search, seen: new Set() })
     }
@@ -368,6 +396,8 @@ async function collectSocial(lane, project, log, signal) {
     }
     if (result.error) {
       errors.push(`${rule.bucket_name}: ${result.error}`)
+      // The message names only the lane and what changed, never the rule or its search; it is what the user can report.
+      if (result.formatChanged) { await setSetting(BROKEN_LANES, { ...await getSetting(BROKEN_LANES), [lane]: { error: result.error, at: now() } }); break }
       if (result.stop) break
       next.failed = true // tried again next run
       continue
@@ -377,19 +407,22 @@ async function collectSocial(lane, project, log, signal) {
     for (const item of fresh) seen.add(item.item_id)
     const done = result.done || result.items.some(item => item.datetime_utc < hole.from)
     cursors[search.key] = fillHole(cursors[search.key], fresh, { next: result.next, done })
-    await enrichItems(fresh, signal)
-    log.fetch_count += fresh.length
-    log.new_count += (await upsert(fresh, !!project.sheet_sink)).length
+    const kept = keep ? fresh.filter(item => keep(rule, item)) : fresh
+    await enrichItems(kept, signal)
+    log.fetch_count += kept.length
+    log.new_count += (await upsert(kept, !!project.sheet_sink)).length
     await patchProject(project.project_id, { [`${lane}_cursors`]: cursors })
     await saveLogProgress(log)
   }
   await patchProject(project.project_id, { [`${lane}_cursors`]: cursors, [`last_${lane}_collected_at`]: now() })
+  const broken = await getSetting(BROKEN_LANES)
+  if (log.checked_count && broken?.[lane]) { delete broken[lane]; await setSetting(BROKEN_LANES, broken) } // read fine again
   return errors.length ? errors.join('; ') : null
 }
 
 // ── Runs ─────────────────────────────────────────────────────────────────────
 const LANES = { events: p => collectGdelt('events', ...p), gkg: p => collectGdelt('gkg', ...p), rss: p => collectRss(...p), mediacloud: p => collectMediaCloud(...p),
-  x: p => collectSocial('x', ...p), bluesky: p => collectSocial('bluesky', ...p) }
+  x: p => collectSocial('x', ...p), bluesky: p => collectSocial('bluesky', ...p), telegram: p => collectSocial('telegram', ...p) }
 const running = new Map() // log_id → AbortController, for runs in this context
 
 channel?.addEventListener('message', ({ data }) => { if (data?.type === 'cancel') running.get(data.logId)?.abort() })
@@ -419,7 +452,7 @@ function runLane(projectId, lane) {
 }
 
 const enabledLanes = p => [['events', p.events_enabled], ['gkg', p.doc_enabled], ['rss', p.rss_enabled], ['mediacloud', p.mediacloud_enabled], ['x', p.x_enabled],
-  ['bluesky', p.bluesky_enabled]]
+  ['bluesky', p.bluesky_enabled], ['telegram', p.telegram_enabled]]
   .filter(([, on]) => on).map(([lane]) => lane)
 
 // "Run now": every enabled lane. Returns false when the project is paused or has no enabled lane.
@@ -446,6 +479,7 @@ export async function collectDue(nowMs = Date.now()) {
       mediacloud: pc.mediacloud_enabled && elapsed(project.last_mediacloud_collected_at, pc.mediacloud_interval_minutes),
       x: pc.x_enabled && elapsed(project.last_x_collected_at, Math.max(pc.x_interval_minutes, 15)),
       bluesky: pc.bluesky_enabled && elapsed(project.last_bluesky_collected_at, Math.max(pc.bluesky_interval_minutes, 15)),
+      telegram: pc.telegram_enabled && elapsed(project.last_telegram_collected_at, Math.max(pc.telegram_interval_minutes, 15)),
     }
     for (const [lane, go] of Object.entries(due)) if (go) runLane(project.project_id, lane)
   }

@@ -33,16 +33,27 @@ function* timelinePosts(node) {
 }
 // TweetWithVisibilityResults wraps the post in `tweet`.
 const unwrap = result => result?.tweet || result
+// A response Canary cannot read means X changed its format: the lane stops and asks the user to tell the developers.
+const formatChanged = message => Object.assign(new Error(message), { formatChanged: true })
+const instructionsOf = json => json?.data?.search_by_raw_query?.search_timeline?.timeline?.instructions
 const handleOf = post => post?.core?.user_results?.result?.core?.screen_name || post?.core?.user_results?.result?.legacy?.screen_name || null
 
 export function xItems(responses, project, rule, query) {
   const items = new Map()
   for (const { body } of responses) {
     let json
-    try { json = JSON.parse(body) } catch { continue }
+    try { json = JSON.parse(body) } catch { throw formatChanged('X sent a search response that is not JSON') }
+    // An empty search still has its timeline; only the field names are reported, never posts or the search.
+    if (!Array.isArray(instructionsOf(json))) {
+      if (json?.errors?.length && !json.data) throw new Error(`X: ${json.errors[0].message}`)
+      throw formatChanged(`X search response has no timeline (top-level fields: ${Object.keys(json?.data ?? json ?? {}).join(', ') || 'none'})`)
+    }
     for (const result of timelinePosts(json)) {
       const post = unwrap(result), legacy = post?.legacy
-      if (!post?.rest_id || !legacy) continue // tombstones and prompts
+      if (!post?.rest_id || !legacy) {
+        if (post?.__typename === 'Tweet') throw formatChanged(`X sent a post without ${post.rest_id ? 'legacy' : 'rest_id'}`)
+        continue // tombstones and prompts
+      }
       const handle = handleOf(post), user = post.core?.user_results?.result
       const created = new Date(legacy.created_at)
       const quoted = unwrap(post.quoted_status_result?.result)

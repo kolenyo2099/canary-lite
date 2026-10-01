@@ -159,8 +159,9 @@ export const api = {
   setTitleEnrichment: (enabled) => request('PUT', '/title-enrichment', { enabled }),
 
   // Extension-only X and Bluesky lanes
-  allowX: () => Promise.resolve({ ok: true, data: null }),
+  allowSites: () => Promise.resolve({ ok: true, data: null }),
   getSocialBudgets: () => request('GET', '/social-budgets'),
+  getBrokenLanes: () => Promise.resolve({ ok: true, data: {} }),
   setSocialBudget: (lane, per) => request('PUT', `/social-budgets/${lane}`, { per }),
   getBlueskyStatus: () => request('GET', '/bluesky/account'),
   setBlueskyAccount: (identifier, password) => request('PUT', '/bluesky/account', { identifier, password }),

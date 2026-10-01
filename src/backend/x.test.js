@@ -34,7 +34,7 @@ describe('X lane', () => {
         entry(post('4', 'Truncated…', { note_tweet: { note_tweet_results: { result: { text: 'The whole long post' } } } })),
       ]),
       response([entry(quoting)]), // the same post in a later page
-      { status: 200, body: 'not json' },
+      response([]), // an empty page
     ]
     const items = xItems(responses, project, rule, 'border')
     expect(items.map(i => i.gdelt_primary_id)).toEqual(['1', '2', '4'])
@@ -45,5 +45,14 @@ describe('X lane', () => {
     })
     expect(items[1]).toMatchObject({ url: 'https://x.com/ap/status/2', normalized: { source_name: '@ap', author_name: 'AP' } })
     expect(items[2].title_or_summary).toBe('The whole long post')
+  })
+
+  it('reports a changed format instead of an empty search', () => {
+    const read = body => () => xItems([{ status: 200, body }], project, rule, 'border')
+    expect(read('not json')).toThrow(expect.objectContaining({ formatChanged: true }))
+    expect(read(JSON.stringify({ data: { search_by_raw_query: { search_timeline: {} } } })))
+      .toThrow(expect.objectContaining({ formatChanged: true, message: 'X search response has no timeline (top-level fields: search_by_raw_query)' }))
+    expect(read(response([entry({ __typename: 'Tweet', rest_id: '5', core: {} })]).body)).toThrow(expect.objectContaining({ formatChanged: true }))
+    expect(read(JSON.stringify({ errors: [{ message: 'Rate limit exceeded' }] }))).toThrow(expect.not.objectContaining({ formatChanged: true }))
   })
 })

@@ -40,8 +40,11 @@ async function readX(url) {
       await new Promise(resolve => setTimeout(resolve, 1000))
       const current = (await chrome.tabs.get(tab.id)).url
       if (current && !current.startsWith('https://x.com/search')) return { error: 'X asked to sign in. Sign in to x.com in this browser.', stop: true }
-      const [injection] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, world: 'MAIN', func: () => window.__canaryX }).catch(() => [])
-      if (injection?.result?.length) return { responses: injection.result }
+      const [injection] = await chrome.scripting.executeScript({ target: { tabId: tab.id }, world: 'MAIN',
+        func: () => ({ responses: window.__canaryX, posts: !!document.querySelector('article') }) }).catch(() => [])
+      if (injection?.result?.responses?.length) return { responses: injection.result.responses }
+      // Posts on screen that x-hook.js never saw arrive means X renamed or reshaped its search request.
+      if (second === 29 && injection?.result?.posts) return { error: 'X showed posts but sent no SearchTimeline response', formatChanged: true }
     }
     return { error: 'X showed no search results within 30 seconds. Check that you are signed in to x.com in this browser.' }
   } finally {

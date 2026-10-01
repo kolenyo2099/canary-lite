@@ -12,6 +12,7 @@
   let lastMediaCloudLog = null
   let lastXLog = null
   let lastBlueskyLog = null
+  let lastTelegramLog = null
   let isTriggering = false
   let isPausing = false
   let interval = null
@@ -76,7 +77,7 @@
     }
   }
 
-  // X and Bluesky: a pause, the oldest stretch not collected yet, and the request budget shared by all projects.
+  // X, Bluesky and Telegram: a pause, the oldest stretch not collected yet, and the request budget shared by all projects.
   let socialBudgets = {}
   function socialState(lane, project, budgets) {
     if (!project?.polling_config?.[`${lane}_enabled`]) return null
@@ -93,6 +94,16 @@
   }
   $: xSocial = socialState('x', $currentProject, socialBudgets)
   $: blueskySocial = socialState('bluesky', $currentProject, socialBudgets)
+  $: telegramSocial = socialState('telegram', $currentProject, socialBudgets)
+
+  // A lane whose source changed its format: the user can email the error to the developers, who need to update Canary.
+  let brokenLanes = {}
+  const LANE_NAMES = { x: 'X', bluesky: 'Bluesky', telegram: 'Telegram' }
+  function reportLink(lane, { error, at }) {
+    const body = [`Lane: ${LANE_NAMES[lane] || lane}`, `Error: ${error}`, `First seen: ${at}`,
+      `Canary version: ${globalThis.chrome?.runtime?.getManifest?.().version || 'dev'}`, `Browser: ${navigator.userAgent}`].join('\n')
+    return `mailto:info@osinv.org?subject=${encodeURIComponent(`Canary: the ${LANE_NAMES[lane] || lane} lane broke`)}&body=${encodeURIComponent(body)}`
+  }
 
   $: eventsCatchUp = catchUpState('events')
   $: gkgCatchUp = catchUpState('gkg')
@@ -100,13 +111,15 @@
   async function load() {
     if (!projectId) return
     const requestedProjectId = projectId
-    const [result, projectResult, budgetResult] = await Promise.all([
+    const [result, projectResult, budgetResult, brokenResult] = await Promise.all([
       api.getLogs(projectId, 20),
       api.getProject(projectId),
       api.getSocialBudgets(),
+      api.getBrokenLanes(),
     ])
     if (requestedProjectId !== projectId) return
     if (budgetResult.ok) socialBudgets = budgetResult.data
+    if (brokenResult.ok) brokenLanes = brokenResult.data
     if (result.ok) {
       logs = result.data
       lastEventsLog = logs.find(l => l.lane === 'events')
@@ -115,6 +128,7 @@
       lastMediaCloudLog = logs.find(l => l.lane === 'mediacloud')
       lastXLog = logs.find(l => l.lane === 'x')
       lastBlueskyLog = logs.find(l => l.lane === 'bluesky')
+      lastTelegramLog = logs.find(l => l.lane === 'telegram')
     }
     if (projectResult.ok) currentProject.set(projectResult.data)
   }
@@ -190,6 +204,13 @@
       </button>
     </div>
   </div>
+
+  {#each Object.entries(brokenLanes) as [lane, report] (lane)}
+    <div class="broken" role="alert">
+      Something broke in the {LANE_NAMES[lane] || lane} lane. Here's what triggered the error: <code>{report.error}</code>
+      <a href={reportLink(lane, report)}>Email info@osinv.org</a>
+    </div>
+  {/each}
 
   <div class="lane-row">
     <span class="lane-name">Events</span>
@@ -301,6 +322,25 @@
   {#if blueskySocial}
     <div class="catch-up" title={blueskySocial.title}>{blueskySocial.label}</div>
   {/if}
+  <div class="lane-row">
+    <span class="lane-name">Telegram</span>
+    {#if lastTelegramLog}
+      <span class="lane-time" title={fmt(lastTelegramLog.finished_at)}>
+        {relativeTime(lastTelegramLog.finished_at)}
+      </span>
+      <span class="lane-counts">+{lastTelegramLog.new_count} new</span>
+      {#if lastTelegramLog.error}
+        <span class="lane-error" title={lastTelegramLog.error}>⚠</span>
+      {:else}
+        <span class="lane-ok">✓</span>
+      {/if}
+    {:else}
+      <span class="lane-time muted">{$currentProject?.polling_config?.telegram_enabled ? 'no runs yet' : 'disabled'}</span>
+    {/if}
+  </div>
+  {#if telegramSocial}
+    <div class="catch-up" title={telegramSocial.title}>{telegramSocial.label}</div>
+  {/if}
 </div>
 
 <style>
@@ -358,5 +398,8 @@
   .lane-ok { color: var(--moss); font-size: 0.7rem; font-weight: 700; }
   .lane-error { color: var(--signal); cursor: help; font-weight: 700; }
   .muted { opacity: 0.55; }
+  .broken { border-left: 3px solid var(--signal); font-size: 0.7rem; line-height: 1.4; margin: 0 0 0.45rem; padding: 0.2rem 0 0.2rem 0.45rem; }
+  .broken code { font-family: var(--mono); font-size: 0.66rem; overflow-wrap: anywhere; }
+  .broken a { color: inherit; display: block; font-weight: 600; margin-top: 0.15rem; }
   .catch-up { font-size: 0.68rem; line-height: 1.35; margin: 0 0 0.2rem 48px; opacity: 0.85; }
 </style>

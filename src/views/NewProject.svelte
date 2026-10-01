@@ -26,6 +26,7 @@
   let mediacloudEnabled = false
   let xEnabled = false
   let blueskyEnabled = false
+  let telegramEnabled = false
   let mediacloudCollections = []
   let legacyMediaCloudCollections = []
   let creating = false
@@ -149,6 +150,7 @@ function doPost(e) {
         if (incoming.some(r => r.lane === 'mediacloud')) mediacloudEnabled = true
         if (incoming.some(r => r.lane === 'x')) xEnabled = true
         if (incoming.some(r => r.lane === 'bluesky')) blueskyEnabled = true
+        if (incoming.some(r => r.lane === 'telegram')) telegramEnabled = true
         notify('success', `Loaded ${incoming.length} rule(s) from file`)
       } catch (_) {
         notify('error', 'Could not parse ruleset file')
@@ -238,6 +240,7 @@ function doPost(e) {
     const mediaCloudChanged = savedLaneWasAddedOrChanged(newRules, 'mediacloud', editedBucket)
     const xChanged = savedLaneWasAddedOrChanged(newRules, 'x', editedBucket)
     const blueskyChanged = savedLaneWasAddedOrChanged(newRules, 'bluesky', editedBucket)
+    const telegramChanged = savedLaneWasAddedOrChanged(newRules, 'telegram', editedBucket)
     const savedLanes = new Set(newRules.map(rule => rule.lane))
     watchlists = [
       ...watchlists.filter((rule, idx) => {
@@ -257,6 +260,7 @@ function doPost(e) {
     if (mediaCloudChanged) mediacloudEnabled = true
     if (xChanged) xEnabled = true
     if (blueskyChanged) blueskyEnabled = true
+    if (telegramChanged) telegramEnabled = true
     showQueryBuilder = false
     editingRuleIdx = null
   }
@@ -316,6 +320,7 @@ function doPost(e) {
         mediacloud_interval_minutes: 1440,
         x_interval_minutes: 60,
         bluesky_interval_minutes: 60,
+        telegram_interval_minutes: 60,
         overlap_minutes: 15,
         events_enabled: eventsEnabled,
         doc_enabled: docEnabled,
@@ -323,6 +328,7 @@ function doPost(e) {
         mediacloud_enabled: mediacloudEnabled,
         x_enabled: xEnabled,
         bluesky_enabled: blueskyEnabled,
+        telegram_enabled: telegramEnabled,
       },
       mediacloud_collections: mediacloudCollections,
     }
@@ -341,7 +347,7 @@ function doPost(e) {
     if (result.ok) {
       projects.update(ps => [result.data, ...ps])
       currentProjectId.set(result.data.project_id)
-      const anyEnabled = eventsEnabled || docEnabled || rssEnabled || mediacloudEnabled || xEnabled || blueskyEnabled
+      const anyEnabled = eventsEnabled || docEnabled || rssEnabled || mediacloudEnabled || xEnabled || blueskyEnabled || telegramEnabled
       notify('success', `Project "${result.data.name}" created${anyEnabled ? ' – collection started' : ''}`)
       currentView.set('inbox')
       if (anyEnabled) {
@@ -520,6 +526,14 @@ function doPost(e) {
         <input type="checkbox" bind:checked={blueskyEnabled} />
         <span>
           <strong>Bluesky</strong> — searches and accounts through Bluesky's API, with an app password (every 60 min)
+        </span>
+      </label>
+    </div>
+    <div class="toggle-row">
+      <label class="toggle-label">
+        <input type="checkbox" bind:checked={telegramEnabled} />
+        <span>
+          <strong>Telegram</strong> — public channels through their t.me web preview, no sign-in (every 60 min)
         </span>
       </label>
     </div>
@@ -721,6 +735,7 @@ function doPost(e) {
   .lane-badge--mediacloud { background: #ede9fe; color: #5b21b6; }
   .lane-badge--x { background: #e5e7eb; color: #111827; }
   .lane-badge--bluesky { background: #dbeafe; color: #1d4ed8; }
+  .lane-badge--telegram { background: #e0f2fe; color: #0369a1; }
   .rule-actions { display: flex; gap: 0.25rem; }
   .btn-rule-edit {
     background: none; border: 1px solid var(--border); border-radius: 3px;

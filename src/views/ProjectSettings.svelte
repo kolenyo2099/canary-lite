@@ -23,6 +23,7 @@
   let mediacloudEnabled = false
   let xEnabled = false
   let blueskyEnabled = false
+  let telegramEnabled = false
   let mediacloudCollections = []
   let legacyMediaCloudCollections = []
   let eventsInterval = 30
@@ -30,8 +31,10 @@
   let rssInterval = 60
   let xInterval = 60
   let blueskyInterval = 60
+  let telegramInterval = 60
   let xBudget = 20
   let blueskyBudget = 300
+  let telegramBudget = 60
   let scriptCopied = false
 
   // Apps Script that users paste into their Google Sheet's bound script editor.
@@ -236,6 +239,7 @@ function doPost(e) {
     mediacloudEnabled = project.polling_config?.mediacloud_enabled ?? false
     xEnabled = project.polling_config?.x_enabled ?? false
     blueskyEnabled = project.polling_config?.bluesky_enabled ?? false
+    telegramEnabled = project.polling_config?.telegram_enabled ?? false
     legacyMediaCloudCollections = cloneMediaCloudCollections(project.mediacloud_collections || [])
     recomputeMediaCloudCollections(legacyMediaCloudCollections)
     eventsInterval = project.polling_config?.events_interval_minutes ?? 30
@@ -243,6 +247,7 @@ function doPost(e) {
     rssInterval = project.polling_config?.rss_interval_minutes ?? 60
     xInterval = project.polling_config?.x_interval_minutes ?? 60
     blueskyInterval = project.polling_config?.bluesky_interval_minutes ?? 60
+    telegramInterval = project.polling_config?.telegram_interval_minutes ?? 60
     sheetUrl = project.sheet_sink?.url || ''
     sheetToken = project.sheet_sink?.token || ''
     sheetPageUrl = project.sheet_sink?.sheet_url || ''
@@ -265,12 +270,12 @@ function doPost(e) {
     }
   }
 
-  // X rules read x.com in this browser, so turning the lane on asks Chrome for access (again, if it was removed).
-  function allowXOnEnable(event) {
+  // X rules read x.com and Telegram rules t.me, so turning the lane on asks Chrome for access (again, if it was removed).
+  function allowOnEnable(event, origin, turnOff) {
     if (!event.currentTarget.checked) return
-    api.allowX().then(result => {
+    api.allowSites([origin]).then(result => {
       if (result.ok) return
-      xEnabled = false
+      turnOff()
       notify('error', result.error)
     })
   }
@@ -290,6 +295,7 @@ function doPost(e) {
     if (budgets.ok) {
       xBudget = budgets.data.x.per
       blueskyBudget = budgets.data.bluesky.per
+      telegramBudget = budgets.data.telegram?.per ?? telegramBudget
     }
   })
 
@@ -362,6 +368,7 @@ function doPost(e) {
     const mediaCloudChanged = savedLaneWasAddedOrChanged(newRules, 'mediacloud', editedBucket)
     const xChanged = savedLaneWasAddedOrChanged(newRules, 'x', editedBucket)
     const blueskyChanged = savedLaneWasAddedOrChanged(newRules, 'bluesky', editedBucket)
+    const telegramChanged = savedLaneWasAddedOrChanged(newRules, 'telegram', editedBucket)
     const savedLanes = new Set(newRules.map(rule => rule.lane))
     watchlists = [
       ...watchlists.filter((rule, idx) => {
@@ -380,6 +387,7 @@ function doPost(e) {
     if (rssChanged) rssEnabled = true
     if (xChanged) xEnabled = true
     if (blueskyChanged) blueskyEnabled = true
+    if (telegramChanged) telegramEnabled = true
     const enableMediaCloud = reconcileMediaCloudLaneAfterRuleMutation(
       mediaCloudChanged,
       true,
@@ -393,6 +401,7 @@ function doPost(e) {
         ...(enableMediaCloud ? ['mediacloud'] : []),
         ...(xChanged ? ['x'] : []),
         ...(blueskyChanged ? ['bluesky'] : []),
+        ...(telegramChanged ? ['telegram'] : []),
       ],
     })
   }
@@ -452,12 +461,14 @@ function doPost(e) {
         mediacloud_enabled: mediacloudEnabled,
         x_enabled: xEnabled,
         bluesky_enabled: blueskyEnabled,
+        telegram_enabled: telegramEnabled,
         events_interval_minutes: eventsInterval,
         doc_interval_minutes: docInterval,
         rss_interval_minutes: rssInterval,
         mediacloud_interval_minutes: 1440,
         x_interval_minutes: xInterval,
         bluesky_interval_minutes: blueskyInterval,
+        telegram_interval_minutes: telegramInterval,
         overlap_minutes: 15,
       },
       mediacloud_collections: mediacloudCollections,
@@ -487,6 +498,7 @@ function doPost(e) {
       if (lane === 'mediacloud') pendingRulePollingOverrides.mediacloud_enabled = true
       if (lane === 'x') pendingRulePollingOverrides.x_enabled = true
       if (lane === 'bluesky') pendingRulePollingOverrides.bluesky_enabled = true
+      if (lane === 'telegram') pendingRulePollingOverrides.telegram_enabled = true
     }
     rulesSaveRequested += 1
     if (!rulesSaveTask) {
@@ -756,7 +768,7 @@ function doPost(e) {
       </div>
       <div class="toggle-row">
         <label class="toggle-label">
-          <input type="checkbox" bind:checked={xEnabled} on:change={allowXOnEnable} />
+          <input type="checkbox" bind:checked={xEnabled} on:change={event => allowOnEnable(event, 'https://x.com/*', () => { xEnabled = false })} />
           X lane
         </label>
       </div>
@@ -779,6 +791,19 @@ function doPost(e) {
         <label for="bluesky-budget">Bluesky requests per 5 minutes, all projects</label>
         <input id="bluesky-budget" type="number" class="form-input form-input--sm" bind:value={blueskyBudget} min="1" max="3000" on:change={() => saveBudget('bluesky', blueskyBudget)} />
         <p class="form-hint">Bluesky rules search Bluesky's API as the account connected in the Bluesky rule editor and collect every post since the last run; quiet searches are checked less often. Bluesky allows 3,000 requests per 5 minutes per internet connection, shared with your own use.</p>
+      </div>
+      <div class="toggle-row">
+        <label class="toggle-label">
+          <input type="checkbox" bind:checked={telegramEnabled} on:change={event => allowOnEnable(event, 'https://t.me/*', () => { telegramEnabled = false })} />
+          Telegram lane
+        </label>
+      </div>
+      <div class="form-group">
+        <label for="telegram-interval">Telegram interval (minutes)</label>
+        <input id="telegram-interval" type="number" class="form-input form-input--sm" bind:value={telegramInterval} min="15" max="1440" />
+        <label for="telegram-budget">Telegram pages per 5 minutes, all projects</label>
+        <input id="telegram-budget" type="number" class="form-input form-input--sm" bind:value={telegramBudget} min="1" max="120" on:change={() => saveBudget('telegram', telegramBudget)} />
+        <p class="form-hint">Telegram rules read public channels through their web preview on t.me, without signing in, and collect every post since the last run; a new channel goes back at most 30 days. Telegram publishes no limit for the preview, so pages are spaced a few seconds apart.</p>
       </div>
     </div>
   </section>
@@ -977,6 +1002,7 @@ function doPost(e) {
   .lane-badge--mediacloud { background: #ede9fe; color: #5b21b6; }
   .lane-badge--x { background: #e5e7eb; color: #111827; }
   .lane-badge--bluesky { background: #dbeafe; color: #1d4ed8; }
+  .lane-badge--telegram { background: #e0f2fe; color: #0369a1; }
   .lane-badge--context { background: #fef3c7; color: #92400e; }
   .rule-lane-header {
     color: var(--text-muted); font-size: 0.68rem; font-weight: 700;
